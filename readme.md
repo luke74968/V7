@@ -28,7 +28,11 @@ conda activate v7_env
 # python -m [모듈이름] [설정파일] [옵션]
 python3 -m or_tools_solver.main configs/config_6.json --max_sleep_current 0.001
 
+
 ## 3. Transformer Solver (V7) 실행
+# 사용할 GPU를 2번과 3번으로 지정
+export CUDA_VISIBLE_DEVICES=2,3
+
 
 ### 훈련 (Training)
 

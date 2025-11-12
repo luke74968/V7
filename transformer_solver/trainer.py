@@ -254,9 +254,10 @@ class PocatTrainer:
                 
                 # 2. POMO (Multi-Start) 확장
                 num_starts = self.env.generator.num_loads
-                if args.num_pomo_samples > 1:
-                    # (Load 개수(num_starts)만큼만 확장)
-                    td = batchify(td, num_starts)
+#               POMO 중복이므로 주석 처리 ( model.py 에서도 batchify(td, num_starts) 중복수행중이었음 ) 
+#               if args.num_pomo_samples > 1:
+#                   # (Load 개수(num_starts)만큼만 확장)
+#                   td = batchify(td, num_starts)
                 
                 # 3. 모델 포워드 (솔루션 생성)
                 out = self.model(

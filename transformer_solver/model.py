@@ -358,9 +358,9 @@ class PocatDecoder(nn.Module):
         # 1. 디코더 쿼리(q_vec) 생성 (A2C Critic과 Actor가 공유)
         
         # (avg_current, unconnected_ratio, step_ratio) 3개 피처 생성
-        avg_current = td["nodes"][..., FEATURE_INDEX["current_out"]].mean(dim=1, keepdim=True)
-        unconnected_ratio = td["unconnected_loads_mask"].float().mean(dim=1, keepdim=True)
-        step_ratio = td["step_count"].float() / (2 * self.N_MAX) 
+        avg_current = td["nodes"][..., FEATURE_INDEX["current_out"]].clone().mean(dim=1, keepdim=True)
+        unconnected_ratio = td["unconnected_loads_mask"].clone().float().mean(dim=1, keepdim=True)
+        step_ratio = td["step_count"].clone().float() / (2 * self.N_MAX)
 
         state_features = torch.cat([avg_current, unconnected_ratio, step_ratio], dim=1)
 
