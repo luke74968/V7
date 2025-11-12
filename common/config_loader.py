@@ -1,5 +1,18 @@
 # common/config_loader.py
 
+"""
+JSON 설정 파일 로더 (common/config_loader.py)
+
+이 파일은 JSON 설정 파일 (예: config.json)을 읽어들여,
+`common/data_classes.py`에 정의된 
+Battery, Load, PowerIC (LDO, Buck) 객체 리스트로 변환하는 역할을 합니다.
+
+주요 기능:
+- `load_configuration_from_file`: 파일 경로를 받아 JSON 문자열을 읽어옵니다.
+- `load_configuration_from_json`: JSON 문자열을 파싱하여 
+                                Battery, Load, LDO, BuckConverter 객체를 생성합니다.
+"""
+
 import json
 from typing import List, Dict, Tuple, Any
 

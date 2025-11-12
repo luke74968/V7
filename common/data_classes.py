@@ -1,5 +1,32 @@
-# V7/common/data_classes.py
+# common/data_classes.py
 
+"""
+핵심 데이터 클래스 정의 (common/data_classes.py)
+
+이 파일은 프로젝트에서 사용되는 모든 핵심 데이터 구조를
+파이썬 데이터클래스(dataclass)로 정의합니다.
+
+주요 클래스:
+1. Battery: 전원 공급원(배터리)의 사양을 정의합니다.
+2. Load: 전력을 소비하는 부하(Load)의 요구사항을 정의합니다.
+3. PowerIC: LDO, Buck 등 전력 변환 IC의 공통 부모 클래스입니다.
+
+주요 설계 특징:
+- 전류 한계 분리: `PowerIC`는 두 종류의 전류 한계를 가집니다.
+  - `original_i_limit`: 설정 파일(JSON)에서 로드되는 IC의 원본 스펙 값입니다.
+  - `i_limit`: `ic_preprocessor`가 열 제약(thermal)을 계산한 후 
+                채워넣는 '실제 유효 한계값'입니다.
+
+- 효율 단순화: `BuckConverter`는 복잡한 효율 곡선 대신,
+  '활성(Active) 90%' 및 '절전(Sleep) 35%'의 고정 효율을 사용합니다.
+
+- 암전류 로직 캡슐화: `PowerIC` 클래스는 절전 상태 계산을 위한
+  헬퍼(Helper) 함수를 제공합니다.
+  - `get_self_sleep_consumption`: IC가 Always-On 경로에 포함되는지 여부(3-state)에
+                                따라 Iop, Iq/Ishut, 0A 중 자체 소모 전류를 반환합니다.
+  - `calculate_sleep_input_for_children`: 자식 노드에 절전 전류를 공급하기 위해
+                                         필요한 입력 전류를 계산합니다.
+"""
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 

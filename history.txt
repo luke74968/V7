@@ -36,3 +36,287 @@ idea 2.  : Reward Function을 완성후의 결과가 아닌 edge based reward로
     _step에서 계산한 step_reward (R_action + R_path + 스텝 페널티)를 그대로 받고.
     실패(R_fail) 시에만 FAILURE_PENALTY로 덮어씀
     
+
+
+V7 Transformer 구조는  **"정적 최대치 고정 (Padding)"**과 **"Parameterized Action Space (Lazy Spawn)"**를 결합하는 리 아키텍처링
+
+좋습니다. V7 아키텍처로의 전환을 위한 계획을 정리해 보겠습니다.
+
+우리의 목표는 명확합니다:
+
+IC 복제본 문제 해결: _copy1, _copy2 등을 미리 생성하는 "Eager Spawn"을 제거합니다.
+
+일반화 성능 확보: config_4.json와 config_6.json처럼 크기가 다른 문제들도 하나의 모델로 풀 수 있게 합니다.
+
+이 두 가지 목표를 달성하기 위해 제안하신 **"정적 최대치 고정 (Padding)"**과 **"Parameterized Action Space (Lazy Spawn)"**를 결합하는 리 아키텍처링을 진행하겠습니다.
+
+이 작업은 V6 코드의 거의 모든 핵심 파일을 수정하는 큰 작업입니다.
+
+🚀 V7 아키텍처 리팩토링 계획
+이 계획은 2단계(Phase)로 나뉩니다.
+
+Phase 1: "정적 최대치 (Padding)"를 도입하여 일반화(목표 2)가 가능한 기반을 만듭니다.
+
+Phase 2: "Parameterized Action"을 도입하여 IC 복제 문제(목표 1)를 해결합니다.
+
+Phase 1: 정적 최대치 고정 (Padding) 및 일반화
+목표: 크기가 다른 config 파일(N=111, N=218 등)을 모두 동일한 N_max (예: 500) 크기의 텐서로 처리할 수 있도록 모델과 환경을 수정합니다.
+
+1. definitions.py 및 run.py 수정
+definitions.py: N_max = 500 (가칭) 같은 글로벌 상수를 정의합니다.
+
+run.py:
+
+시작 시 env.generator.num_nodes를 읽어 model_params에 주입하는 로직을 제거합니다.
+
+대신 N_max 값을 모델(PocatModel) 생성 시 하드코딩된 파라미터로 전달합니다.
+
+(선택 사항) 훈련 루프가 config_6.json만 읽는 것이 아니라, configs/ 폴더 내의 여러 .json 파일을 순회하며 학습할 수 있도록 trainer.run() 로직을 수정합니다.
+
+2. env_generator.py 수정
+__init__: num_nodes를 계산하는 대신, N_max를 사용합니다.
+
+_create_feature_tensor: 텐서 크기를 (self.num_nodes, FEATURE_DIM)이 아닌 (self.N_max, FEATURE_DIM)으로 생성합니다.
+
+실제 노드(예: 218개)는 0~217번 슬롯에 채우고, 218~499번 슬롯은 0으로 **패딩(padding)**합니다.
+
+_create_connectivity_matrix: (self.N_max, self.N_max) 크기로 생성합니다.
+
+__call__:
+
+nodes 텐서 (B, N_max, D)를 반환합니다.
+
+[신규] attention_mask 텐서 (B, N_max, N_max)를 생성하여 반환합니다.
+
+이 마스크는 "실제 노드(0~217) 끼리는 상호작용 가능", "패딩 노드(218~499)는 무시"하도록 설정됩니다.
+
+3. model.py 수정
+PocatModel __init__: num_nodes 대신 N_max를 받도록 수정합니다.
+
+PocatEncoder forward: td 외에 attention_mask를 추가로 입력받습니다.
+
+EncoderLayer forward: multi_head_attention 함수 호출 시, 이 attention_mask를 전달하여 패딩된 노드와는 어텐션이 계산되지 않도록 합니다.
+
+PocatDecoder forward: cache에서 logit_key를 가져올 때 패딩된 노드의 스코어가 0이 되도록 마스킹합니다.
+
+4. solver_env.py 수정
+_make_spec: 모든 num_nodes 참조를 N_max로 변경합니다.
+
+get_action_mask: 모델이 패딩된 노드(예: 218~499번)를 절대 선택할 수 없도록, 이 슬롯들을 항상 False로 마스킹합니다.
+
+➡️ Phase 1 완료 시점: 우리는 "Eager Spawn" 방식은 그대로지만, 크기가 다른 여러 문제를 하나의 모델로 학습시킬 수 있는 일반화된 V7 모델을 갖게 됩니다.
+
+Phase 2: Parameterized Action Space (Lazy Spawn) 적용
+목표: Phase 1에서 만든 N_max 구조 위에서, "Eager Copying" 로직을 "Lazy Spawn" 로직으로 대체합니다.
+
+1. env_generator.py 수정
+expand_ic_instances: "복제본 생성" 로직 (num_to_create 루프)을 완전히 제거합니다.
+
+이 함수는 이제 Vin/Vout이 확정된 "IC 템플릿" 리스트(예: 206개)만 생성합니다.
+
+_create_feature_tensor: N_max 텐서에 노드를 다음과 같이 배치합니다.
+
+슬롯 0: 배터리
+
+슬롯 1~11: 11개의 로드 (Active)
+
+슬롯 12~217: 206개의 IC 템플릿 (Template)
+
+슬롯 218~499: 빈 슬롯 (Empty)
+
+2. definitions.py 수정
+FEATURE_INDEX에 is_active (동적), is_template (정적) 같은 새로운 상태 피처를 추가하여, 모델이 노드 슬롯의 3가지 상태(Active, Template, Empty)를 구별할 수 있게 합니다.
+
+3. model.py (핵심 수정)
+PocatDecoder: forward 함수가 더 이상 (B, N_max)의 단일 확률을 반환하지 않습니다.
+
+Parameterized Action Head로 변경:
+
+head_action_type (B, 2): ["Connect", "Spawn"] 중 하나를 결정하는 헤드.
+
+head_connect_target (B, N_max): "Connect" 시, is_active=True인 노드 중에서만 선택하는 헤드.
+
+head_spawn_template (B, N_max): "Spawn" 시, is_template=True인 노드 중에서만 선택하는 헤드.
+
+forward 함수는 이 3개의 헤드에서 나온 확률(log_probs)과 A2C를 위한 value를 반환합니다.
+
+4. solver_env.py (핵심 수정)
+action_spec: 3개의 개별 액션을 받는 Composite 스펙으로 변경합니다.
+
+_step 함수 재설계:
+
+td["action"]에서 action_type을 읽습니다.
+
+if action_type == "Connect":
+
+connect_target 인덱스를 가져와 기존처럼 adj_matrix에 엣지를 추가합니다.
+
+if action_type == "Spawn":
+
+spawn_template 인덱스(예: 50번 LDO_A@12V_3.3V)를 가져옵니다.
+
+첫 번째 "Empty" 슬롯 (예: 218번)을 찾습니다.
+
+50번 템플릿의 피처를 218번 슬롯으로 **복사(Spawn)**합니다.
+
+218번 슬롯의 is_active를 True로 변경합니다.
+
+adj_matrix에 (현재 헤드 -> 218번) 엣지를 추가합니다.
+
+current_cost에 50번 템플릿의 cost를 더합니다.
+
+get_action_mask:
+
+"Connect"가 가능한지, "Spawn"이 가능한지 판단합니다.
+
+head_connect_target과 head_spawn_template을 위한 2개의 개별 마스크를 생성하여 model.py에 전달합니다.
+
+이 리 아키텍처링을 진행하면, V6의 IC 복제본 문제와 일반화 문제를 모두 해결하는 강력한 V7 모델을 얻게 될 것입니다. Phase 1부터 시작하는 것이 좋겠습니다.
+
+이렇게 진행하는거 어떻게 생각해
+
+### ChatGPT said:
+
+Thought for 28s
+
+완전 찬성! 계획 자체가 탄탄합니다. 여기에 **바로 적용하면 좋은 보완·주의 포인트**만 덧붙일게요 — Phase 1/2 각각 핵심만.
+
+---
+
+# Phase 1 (Padding, 일반화) — 보완 포인트
+
+- **N_max 크기 선정**
+    
+    500 고정 OK. 다만 self-attn은 여전히 O(N_max²)이니, 인코더 층 수를 1–2층으로 얕게 두고, “무거운 결정”은 **포인터 헤드(후술)**로 넘기면 VRAM 안정적입니다.
+    
+    (B×L×N_max² 메모리 감안)
+    
+- **마스크 dtype/값**
+    
+    프레임워크별로 `attention_mask` 기대값이 다릅니다.
+    
+    - PyTorch MHA: `attn_mask`는 (B·H, N, N) float, **masked 위치에 `1e9`**(또는 `inf`)
+    - 일부 구현은 bool도 지원하나 혼용하면 NaN 나옵니다. 한 곳에서 통일하세요.
+- **alive/pad 이중 마스크**
+    
+    ```python
+    alive = torch.zeros(B, N_max, dtype=torch.bool); alive[:, :N_alive] = True
+    A = alive.unsqueeze(1) & alive.unsqueeze(2)   # (B,N,N)
+    attn_mask = torch.where(A, 0.0, torch.tensor(-1e9, device=A.device))
+    
+    ```
+    
+    디코더 쪽 선택 마스크도 **pad 슬롯은 영구 False**.
+    
+- **다중 config 학습**
+    
+    `WeightedRandomSampler`로 작은/큰 인스턴스 비율 균형. config별 정규화(예: cost scale)를 **고정 스케일**로 맞춰 분포 이동 방지.
+    
+
+---
+
+# Phase 2 (Lazy Spawn, Parameterized) — 설계 튜닝
+
+## 1) 슬롯 상태·배치
+
+- 슬롯 구분: `state ∈ {PAD=0, ACTIVE=1, TEMPLATE=2}`
+    
+    `is_active`/`is_template`를 별도 비트로 두어도 OK.
+    
+- 템플릿은 **“소모되지 않는 bank”**로 취급(같은 템플릿을 여러 번 spawn 가능).
+    
+    스폰 상한(타입별 `max_copies`)은 **spawn_mask**에서 제어.
+    
+
+## 2) 액션 헤드 구성 (팩터드 이산)
+
+당신안(3헤드) 좋습니다. 구현 팁만:
+
+- **타입(head_action_type: Connect/Spawn)**
+    
+    불가능한 타입은 **로그확률을 -inf로 강제**(예: 빈 슬롯 없음 → Spawn 금지).
+    
+- **Connect 헤드**: logits over N_max, 마스크는 `ACTIVE ∧ feasible_parent`
+- **Spawn 헤드**: logits over N_max(템플릿 슬롯만 True) *또는* **K_tpl 전용 뷰**
+    - 성능·가독성 측면에서 **K_tpl 전용 헤드** 권장:
+        - 템플릿 임베딩은 `tpl_bank[K_tpl, D]`로 따로 유지
+        - 인코더 컨텍스트에는 “대표 템플릿 요약(옵션)”만 넣고, **포인터는 K_tpl로만** 계산
+    - 그대로 N_max 내 템플릿 슬롯을 써도 무방 (코드 단순)
+- **로그확률 합성**
+    
+    `logπ(a|s) = logπ(type|s) + logπ(arg|type,s)`
+    
+    PPO/BC 모두 이 합성 logp로 처리.
+    
+- **샘플링/탐욕**
+    
+    두 단계로 나눴다면: 먼저 type 샘플 → 해당 arg 헤드에서 샘플.
+    
+    단일 플랫 헤드로 합치는 대신 **팩터드**가 디버깅에 유리합니다.
+    
+
+## 3) 스폰 절차(원자성)
+
+```python
+slot = next_free[b].item()          # 없으면 spawn 타입 마스크 False
+node_feat[b, slot] = instantiate(template_id)  # (Vin,Vout,Imax,η,θJA,cost…)
+state[b, slot] = ACTIVE
+next_free[b] += 1
+attach(child, slot)                  # I_used/열/시퀀스 등 즉시 갱신
+cost += template_cost
+
+```
+
+- **불가피한 롤백 대비**: attach 실패 시(이론상 마스크가 막지만), **전부 되돌리기**.
+
+## 4) 마스크 체계 (중요)
+
+- Connect: C1~C12 + `Find-parent 모드에서는 Unconnected-Load 마스크 비활성`(지난 버그 가드).
+- Spawn: 템플릿별 전압정합, 입력 경로 가능성(상류 전류 역산 C8), `max_copies`, EMI 옵션(P4/P5) 등.
+
+## 5) 보상
+
+- 즉시보상: `r = -ΔBOM(action)` (+ λ_ic·Δ#IC, + λ_sw·Δ#DCDC 선택)
+- 경로 닫힘 보상: 로드→배터리 연결 **성공 시** 소규모 보너스(효율/열 여유 가점).
+- 실패/막힘: 큰 음수 후 에피소드 조기 종료(학습 안정).
+
+## 6) 학습 루틴
+
+- **BC ⇒ PPO 파인튜닝** 강추 (OR-Tools 레퍼런스).
+- Advantage 표준화, grad-clip(1.0), entropy 0.005~0.02.
+- **POMO 멀티스타트**로 로드 순서 다양화.
+
+## 7) 성능/VRAM 최적화
+
+- 인코더는 얕게(1–2층), **포인터 스코어링은 (N_active + K_tpl)** 크기만 계산 → 실질 병목 축소.
+- 혼합정밀 + key/value 캐싱(off-policy 아님, per-step reuse) 고려.
+
+---
+
+## 작게 다른 선택지 (원하면)
+
+- **Flat 단일 헤드**: [부모 후보 ∪ 템플릿 후보]를 한 번에 점수화(단순).
+- **Two-stage(추천)**: type → arg. (마스크·로그확률 분해가 깔끔, 디버그 용이)
+
+---
+
+## 체크리스트 (바로 적용)
+
+- [ ]  `state∈{PAD,ACTIVE,TEMPLATE}` 및 `alive_mask` 도입
+- [ ]  `attention_mask` NaN 방지(−1e9) 통일
+- [ ]  `head_action_type`, `head_connect`, `head_spawn` + 마스크 3종
+- [ ]  `logp = logp_type + logp_arg`(PPO/BC 공통)
+- [ ]  **Spawn 불가/Connect 불가일 때 type 마스크로 차단**
+- [ ]  `Find-parent` 모드에서 Unconnected-Load 마스크 **비활성**
+- [ ]  `ΔBOM` 중심 즉시보상 + 경로완성 보너스
+- [ ]  템플릿 **은행**(K_tpl) 유지, `max_copies`로 스폰 상한
+
+---
+
+### 결론
+
+당신이 제안한 **Phase 1 → Phase 2** 경로는 최선의 이행 전략입니다.
+
+위 보완만 얹으면, **일반화(N_max)**와 **복제 제거(Lazy Spawn)**를 동시에 안정적으로 달성할 수 있어요.
+
+원하면 `model.py / solver_env.py`용 **미니 패치 스켈레톤**(head 시그니처, 마스크, logp 합성, 스폰 루틴)을 바로 드리겠습니다.
