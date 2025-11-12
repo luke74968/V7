@@ -37,6 +37,7 @@ idea 2.  : Reward Function을 완성후의 결과가 아닌 edge based reward로
     실패(R_fail) 시에만 FAILURE_PENALTY로 덮어씀
     
 
+2020-11-12 
 
 V7 Transformer 구조는  **"정적 최대치 고정 (Padding)"**과 **"Parameterized Action Space (Lazy Spawn)"**를 결합하는 리 아키텍처링
 

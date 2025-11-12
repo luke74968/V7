@@ -2,8 +2,9 @@
 
 # 모델 파라미터
 model_params:
+   N_MAX: 500 
    embedding_dim: 256
-   encoder_layer_num: 6
+   encoder_layer_num: 2
    qkv_dim: 16
    head_num: 16
    ff_hidden_dim: 512
