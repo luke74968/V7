@@ -338,8 +338,13 @@ class PocatEnv(EnvBase):
                 # 'Spawn' 헤드에서 템플릿 인덱스 가져오기
                 template_idx = spawn_template[b_idx_spawn] # (B_spawn,)
                 # 스폰될 빈 슬롯 인덱스 가져오기
-                slot_idx = next_obs["next_empty_slot_idx"][b_idx_spawn].squeeze(-1) # (B_spawn,)
-                
+                # NOTE:
+                #   next_empty_slot_idx 텐서는 이후 스폰 로직에서 in-place로 +1 갱신된다.
+                #   clone() 없이 그대로 사용하면, 아래에서 next_empty_slot_idx를 수정할 때
+                #   autograd가 저장해 둔 slot_idx 인덱스가 변경되어 "modified by an inplace"
+                #   오류가 발생한다. 안전하게 별도 복사본을 사용한다.
+                slot_idx = next_obs["next_empty_slot_idx"][b_idx_spawn].clone().squeeze(-1) # (B_spawn,)
+
                 # 1. Spawn: 템플릿 피처 -> 빈 슬롯으로 복사
                 template_features = next_obs["nodes"][b_idx_spawn, template_idx]
                 next_obs["nodes"][b_idx_spawn, slot_idx] = template_features.detach()
