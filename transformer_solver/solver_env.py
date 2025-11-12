@@ -247,8 +247,8 @@ class PocatEnv(EnvBase):
         connect_target = action_dict["connect_target"].squeeze(-1)
         spawn_template = action_dict["spawn_template"].squeeze(-1)
         
-        current_head = td["trajectory_head"].squeeze(-1) # (B,)
-        
+        current_head = td["trajectory_head"].clone().squeeze(-1) # (B,)
+
         # --- 0. 이미 'done'인 배치는 무시 ---
         is_already_done = td["done"].squeeze(-1)
         if is_already_done.all():
@@ -544,8 +544,8 @@ class PocatEnv(EnvBase):
         self._ensure_buffers(td) # 버퍼 최신화
 
         batch_size, num_nodes = td.batch_size[0], self.N_max
-        current_head = td["trajectory_head"].squeeze(-1) # (B,)
-        
+        current_head = td["trajectory_head"].clone().squeeze(-1) # (B,)
+
         # --- 1. 기본 상태 마스크 (저비용) ---
         is_active = td["is_active_mask"] # (B, N_max) - 현재 활성 노드
         is_template = td["is_template_mask"] # (B, N_max) - 템플릿 노드

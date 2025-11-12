@@ -365,8 +365,15 @@ class PocatDecoder(nn.Module):
         state_features = torch.cat([avg_current, unconnected_ratio, step_ratio], dim=1)
 
         # 현재 Head 노드의 임베딩 가져오기
-        head_idx = td["trajectory_head"].squeeze(-1)
-        head_emb = cache.node_embeddings[torch.arange(td.batch_size[0]), head_idx]
+        # NOTE:
+        #   td["trajectory_head"]는 환경 단계(env.step)에서 in-place로 갱신된다.
+        #   squeeze(-1)만 호출하면 동일한 저장소(storage)를 공유하게 되며,
+        #   이후 env.step에서 해당 텐서를 수정할 때 autograd가 저장해둔 인덱스가
+        #   변경되어 버려 역전파 시 "modified by an inplace operation" 오류가 발생한다.
+        #   clone()으로 독립적인 텐서를 만들어 안전하게 사용한다.
+        head_idx = td["trajectory_head"].clone().squeeze(-1)
+        batch_indices = torch.arange(td.batch_size[0], device=head_idx.device)
+        head_emb = cache.node_embeddings[batch_indices, head_idx]
         
         # 쿼리 입력: (Head 임베딩 + 3개 상태 피처)
         query_input = torch.cat([head_emb, state_features], dim=1)
@@ -415,7 +422,7 @@ class PocatModel(nn.Module):
         # config.yaml에서 N_MAX 주입
         self.N_MAX = model_params['N_MAX']
         # model_params에서 N_MAX를 pop하여 중복 전달 방지
-        # (PocatPromptNet과 PocatDecoder는 N_MAX를 명시적 인자로 받음)
+        # (PocatPromptNet과 PocatDecoder는 N_MAX를 명시적 인자로 받음)s
         n_max_value = model_params.pop('N_MAX')
         self.prompt_net = PocatPromptNet(N_MAX=n_max_value, **model_params)
         self.encoder = PocatEncoder(**model_params)
