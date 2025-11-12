@@ -413,8 +413,18 @@ class PocatEnv(EnvBase):
 
             # 3c. 다음 Head 설정
             parent_is_battery = (parent_node == BATTERY_NODE_IDX)
+            
+            # 헤드(parent_node)가 이미 부모를 가졌는지 확인
+            # adj_matrix_T[b, node, :]가 1이라도 있으면, node는 이미 부모가 있음
+            parent_already_has_parent = next_obs["adj_matrix_T"][b_idx_node, parent_node].any(dim=-1)
+            
+            # 배터리에 도달하거나, 이미 연결된 노드에 도달하면 경로 완성
+            path_is_finished = parent_is_battery | parent_already_has_parent
+
             next_obs["trajectory_head"][b_idx_node, 0] = torch.where(
-                parent_is_battery, BATTERY_NODE_IDX, parent_node
+                path_is_finished,  # 💡 조건 변경
+                BATTERY_NODE_IDX,  # 경로가 끝났으면 배터리로 복귀
+                parent_node        # 아니면 경로 추적 계속
             )
             
             # 3d. 경로 완성 (R_path 보상)
@@ -1028,9 +1038,19 @@ class PocatEnv(EnvBase):
         # 4. 전류 수요 전파 (LDO/Buck 효율 적용)
         current_demands_sleep = load_sleep_draw + ic_self_sleep
         
-        ic_mask_b_n = (self.node_type_tensor == NODE_TYPE_IC)
-        ldo_mask_b = (self.node_type_tensor == NODE_TYPE_IC) & (td["nodes"][0, :, FEATURE_INDEX["ic_type_idx"]] == 1.0)
-        buck_mask_b = (self.node_type_tensor == NODE_TYPE_IC) & (td["nodes"][0, :, FEATURE_INDEX["ic_type_idx"]] == 2.0)
+        # (B, N) 모양의 LDO/Buck 마스크를 생성합니다.
+        # (B, N)
+        ic_type = td["nodes"][..., FEATURE_INDEX["ic_type_idx"]]
+        
+        # (B, N)
+        ldo_mask_b = torch.isclose(ic_type, torch.tensor(1.0, device=ic_type.device))
+        
+        # (B, N)
+        buck_mask_b = torch.isclose(ic_type, torch.tensor(2.0, device=ic_type.device))
+
+        # (참고: ic_mask_b_n은 이 함수에서 사용되지 않으므로 삭제하거나 (B, N)으로 만들어야 함)
+        # (B, N)
+        ic_mask_b_n = (self.node_type_tensor == NODE_TYPE_IC).expand(batch_size, -1)        
         
         vin = td["nodes"][..., FEATURE_INDEX["vin_min"]]
         vout = td["nodes"][..., FEATURE_INDEX["vout_min"]]
