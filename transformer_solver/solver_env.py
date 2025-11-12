@@ -247,7 +247,8 @@ class PocatEnv(EnvBase):
         connect_target = action_dict["connect_target"].squeeze(-1)
         spawn_template = action_dict["spawn_template"].squeeze(-1)
         
-        current_head = td["trajectory_head"].clone().squeeze(-1) # (B,)
+        current_head = td["trajectory_head"].detach().clone().squeeze(-1) # (B,)
+
 
         # --- 0. 이미 'done'인 배치는 무시 ---
         is_already_done = td["done"].squeeze(-1)
@@ -258,7 +259,7 @@ class PocatEnv(EnvBase):
                 "done": td["done"]}, batch_size=td.batch_size)
 
         # --- 1. 상태 텐서 복제 (수정 준비) ---
-        next_obs = td.clone(recurse=False)
+        next_obs = td.clone()
         # (In-place 수정이 발생하는 동적 텐서들은 모두 깊은 복사)
         next_obs["nodes"] = td["nodes"].clone() # (가장 중요)
         next_obs["adj_matrix"] = td["adj_matrix"].clone()
@@ -272,7 +273,7 @@ class PocatEnv(EnvBase):
         next_obs["staging_cost"] = td["staging_cost"].clone()
         next_obs["step_count"] = td["step_count"].clone()
         next_obs["is_used_ic_mask"] = td["is_used_ic_mask"].clone()
-        next_obs["trajectory_head"] = td["trajectory_head"].clone()
+        next_obs["trajectory_head"] = td["trajectory_head"].detach().clone()
         next_obs["unconnected_loads_mask"] = td["unconnected_loads_mask"].clone()
         next_obs["current_cost"] = td["current_cost"].clone()
         next_obs["next_empty_slot_idx"] = td["next_empty_slot_idx"].clone()
@@ -549,7 +550,7 @@ class PocatEnv(EnvBase):
         self._ensure_buffers(td) # 버퍼 최신화
 
         batch_size, num_nodes = td.batch_size[0], self.N_max
-        current_head = td["trajectory_head"].clone().squeeze(-1) # (B,)
+        current_head = td["trajectory_head"].detach().clone().squeeze(-1) # (B,)
 
         # --- 1. 기본 상태 마스크 (저비용) ---
         is_active = td["is_active_mask"] # (B, N_max) - 현재 활성 노드

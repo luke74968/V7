@@ -371,7 +371,7 @@ class PocatDecoder(nn.Module):
         #   이후 env.step에서 해당 텐서를 수정할 때 autograd가 저장해둔 인덱스가
         #   변경되어 버려 역전파 시 "modified by an inplace operation" 오류가 발생한다.
         #   clone()으로 독립적인 텐서를 만들어 안전하게 사용한다.
-        head_idx = td["trajectory_head"].clone().squeeze(-1)
+        head_idx = td["trajectory_head"].detach().squeeze(-1).clone()
         batch_indices = torch.arange(td.batch_size[0], device=head_idx.device)
         head_emb = cache.node_embeddings[batch_indices, head_idx]
         
