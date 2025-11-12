@@ -1,0 +1,38 @@
+2025-09-26
+
+# Transformer solver가 학습을 하지만
+# Tree 구조가 아닌 Star 구조로 학습 ( Local minima 에 빠짐 ) 하고있음 같은 전압을 사용하는것은 잘 묶고 , 독립조건은 만족하지만 
+
+2025-09-30 
+N POMO 로 변경 (POMO N번 동시에 학습 )
+
+2025-10-03 node feature에 id 및 독립여부 추가하였으나 개선사항 없음 , lr 10-4 -> 10-7로 조정해보았으나 효과없음
+
+2025-10-10 Debug 모드로 OR-Tools Solver의 해를 Transformer 솔버가 생성 할 수 있는지 (마스킹 로직에 문제는 없는지) 검토하였으나 특이사항 없음.
+
+2025-10-16 
+idea 1.  : 특정 Action이 어떻게 수렴하는 확인좀 해보자 
+idea 2.  : Reward Function을 완성후의 결과가 아닌 edge based reward로 변경 ( 기존 state 대비 상승금액 )
+
+
+중간에 논문작성 및 강의준비로 수행 못함 
+
+2025-11-03-05 두번째 load 부터 마스킹이 잘못되어 연결가능한 Power IC 가 없음을 확인 및 수정 ==> 이거도 원인일 수 있으려나 
+
+2025-11-05 리워드 수정
+    1. 보상 상수 추가: 
+    REWARD_WEIGHT_ACTION, REWARD_WEIGHT_PATH 등 튜닝 가능한 상수를 파일 상단에 추가
+    State Spec 추가: _make_spec에 staging_cost (경로 누적 비용)를 추가
+    State 초기화: _reset에서 staging_cost를 0으로 초기화
+    
+    2. _step 로직 변경:
+    Select New Load 시 staging_cost를 0으로 리셋
+    Find Parent 시 total_cost_increase (액션 비용)를 계산
+    R_action 보상 (REWARD_WEIGHT_ACTION * -total_cost_increase)을 적용
+    staging_cost에 total_cost_increase를 누적 
+    경로 완성 시(parent_is_battery) R_path 보상 (REWARD_WEIGHT_PATH * -staging_cost)을 적용하고 staging_cost를 리셋
+    
+    3.get_reward 로직 변경:
+    _step에서 계산한 step_reward (R_action + R_path + 스텝 페널티)를 그대로 받고.
+    실패(R_fail) 시에만 FAILURE_PENALTY로 덮어씀
+    
