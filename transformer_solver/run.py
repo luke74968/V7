@@ -178,7 +178,11 @@ if __name__ == "__main__":
         sys.exit(1)
 
 
-    # --- 시드 설정 (DDP 랭크별로 다른 시드) ---
+    # --- DDP 속성 및 시드 설정 (main 함수 호출 전) ---
+    # (main 함수 내의 DDP 설정 로직을 여기서 미리 실행)
+    args.world_size = int(os.environ.get('WORLD_SIZE', 1))
+    args.ddp = args.world_size > 1
+    
     seed = args.seed
     if args.ddp:
         seed += local_rank_init # DDP 랭크별 오프셋 추가

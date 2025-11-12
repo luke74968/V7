@@ -15,8 +15,7 @@ from .definitions import (
     NODE_TYPE_IC, NODE_TYPE_EMPTY
 )
 from .utils.common import batchify
-# (solver_env.py는 아직 만들지 않았지만, 임포트 구문은 미리 정의합니다)
-# from .solver_env import PocatEnv, BATTERY_NODE_IDX 
+from .solver_env import PocatEnv, BATTERY_NODE_IDX 
 
 
 # ---
@@ -415,10 +414,12 @@ class PocatModel(nn.Module):
         
         # config.yaml에서 N_MAX 주입
         self.N_MAX = model_params['N_MAX']
-        
-        self.prompt_net = PocatPromptNet(N_MAX=self.N_MAX, **model_params)
+        # model_params에서 N_MAX를 pop하여 중복 전달 방지
+        # (PocatPromptNet과 PocatDecoder는 N_MAX를 명시적 인자로 받음)
+        n_max_value = model_params.pop('N_MAX')
+        self.prompt_net = PocatPromptNet(N_MAX=n_max_value, **model_params)
         self.encoder = PocatEncoder(**model_params)
-        self.decoder = PocatDecoder(N_MAX=self.N_MAX, **model_params)
+        self.decoder = PocatDecoder(N_MAX=n_max_value, **model_params)
     
     def _sample_action(self, logits, mask, decode_type):
         """ 

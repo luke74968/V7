@@ -78,6 +78,7 @@ class PocatEnv(EnvBase):
             
             # --- 동적 텐서 (Env 관리) ---
             "adj_matrix": Unbounded(shape=(num_nodes, num_nodes), dtype=torch.bool),
+            "adj_matrix_T": Unbounded(shape=(num_nodes, num_nodes), dtype=torch.bool),
             "unconnected_loads_mask": Unbounded(shape=(num_nodes,), dtype=torch.bool),
             "trajectory_head": UnboundedDiscrete(shape=(1,)),
             "step_count": UnboundedDiscrete(shape=(1,)),
@@ -181,10 +182,14 @@ class PocatEnv(EnvBase):
         
         # adj_matrix: (B, N_max, N_max) - 실제 연결된 엣지 (모두 0)
         adj_matrix = torch.zeros(batch_size, num_nodes, num_nodes, dtype=torch.bool, device=self.device)
-        
+        adj_matrix_T = torch.zeros(batch_size, num_nodes, num_nodes, dtype=torch.bool, device=self.device)
+
         # is_active_mask: (B, N_max) - 현재 활성화된 노드 (정적 피처에서 복사)
         is_active_mask = td_initial["nodes"][..., FEATURE_INDEX["is_active"]].bool()
-        
+        # (정적 피처에서 동적 마스크로 복사)
+        is_template_mask = td_initial["nodes"][..., FEATURE_INDEX["is_template"]].bool()
+        can_spawn_into_mask = td_initial["nodes"][..., FEATURE_INDEX["can_spawn_into"]].bool()
+
         # unconnected_loads_mask: (B, N_max) - 아직 연결 안 된 로드
         node_types = td_initial["nodes"][0, :, FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
         unconnected_loads_mask = (node_types == NODE_TYPE_LOAD).unsqueeze(0).expand(batch_size, -1)
@@ -195,7 +200,7 @@ class PocatEnv(EnvBase):
         # 2. TensorDict 생성
         reset_td = TensorDict({
             # 정적 텐서 (Generator로부터 복사)
-            "nodes": td_initial["nodes"],
+            "nodes": td_initial["nodes"].clone(),
             "scalar_prompt_features": td_initial["scalar_prompt_features"],
             "matrix_prompt_features": td_initial["matrix_prompt_features"],
             "connectivity_matrix": td_initial["connectivity_matrix"],
@@ -203,8 +208,11 @@ class PocatEnv(EnvBase):
             
             # 동적 텐서 (초기화)
             "adj_matrix": adj_matrix,
+            "adj_matrix_T": adj_matrix_T,
             "unconnected_loads_mask": unconnected_loads_mask,
             "is_active_mask": is_active_mask,
+            "is_template_mask": is_template_mask,
+            "can_spawn_into_mask": can_spawn_into_mask,
             "next_empty_slot_idx": next_empty_slot_idx,
             "trajectory_head": torch.full((batch_size, 1), BATTERY_NODE_IDX, dtype=torch.long, device=self.device),
             "step_count": torch.zeros(batch_size, 1, dtype=torch.long, device=self.device),
@@ -250,14 +258,21 @@ class PocatEnv(EnvBase):
                 "done": td["done"]}, batch_size=td.batch_size)
 
         # --- 1. 상태 텐서 복제 (수정 준비) ---
-        next_obs = td.clone()
+        next_obs = td.clone(recurse=False)
+        # (In-place 수정이 발생하는 동적 텐서들은 모두 깊은 복사)
         next_obs["nodes"] = td["nodes"].clone() # (가장 중요)
         next_obs["adj_matrix"] = td["adj_matrix"].clone()
-        next_obs["is_used_ic_mask"] = td["is_used_ic_mask"].clone()
+        next_obs["adj_matrix_T"] = td["adj_matrix_T"].clone()
         next_obs["is_active_mask"] = td["is_active_mask"].clone()
+        next_obs["is_template_mask"] = td["is_template_mask"].clone()
+        next_obs["can_spawn_into_mask"] = td["can_spawn_into_mask"].clone()
         next_obs["current_target_load"] = td["current_target_load"].clone()
         next_obs["is_exclusive_mask"] = td["is_exclusive_mask"].clone()
         next_obs["staging_cost"] = td["staging_cost"].clone()
+        next_obs["is_used_ic_mask"] = td["is_used_ic_mask"].clone()
+        next_obs["adj_matrix_T"] = td["adj_matrix_T"].clone()
+        next_obs["trajectory_head"] = td["trajectory_head"].clone()
+        next_obs["unconnected_loads_mask"] = td["unconnected_loads_mask"].clone()
         next_obs["current_cost"] = td["current_cost"].clone()
         next_obs["next_empty_slot_idx"] = td["next_empty_slot_idx"].clone()
 
@@ -326,8 +341,8 @@ class PocatEnv(EnvBase):
                 
                 # 1. Spawn: 템플릿 피처 -> 빈 슬롯으로 복사
                 template_features = next_obs["nodes"][b_idx_spawn, template_idx]
-                next_obs["nodes"][b_idx_spawn, slot_idx] = template_features
-                
+                next_obs["nodes"][b_idx_spawn, slot_idx] = template_features.detach()                
+
                 # 2. 상태 변경: (Template -> Active)
                 next_obs["nodes"][b_idx_spawn, slot_idx, FEATURE_INDEX["is_active"]] = 1.0
                 next_obs["nodes"][b_idx_spawn, slot_idx, FEATURE_INDEX["is_template"]] = 0.0
@@ -335,7 +350,9 @@ class PocatEnv(EnvBase):
                 
                 # 3. 환경 동적 마스크 업데이트
                 next_obs["is_active_mask"][b_idx_spawn, slot_idx] = True
-                
+                next_obs["is_template_mask"][b_idx_spawn, slot_idx] = False
+                next_obs["can_spawn_into_mask"][b_idx_spawn, slot_idx] = False
+
                 # 4. 다음 빈 슬롯 인덱스 +1
                 next_obs["next_empty_slot_idx"][b_idx_spawn] += 1
                 
@@ -360,7 +377,9 @@ class PocatEnv(EnvBase):
             
             # 3a. 엣지 추가: (parent_node) -> (child_node)
             next_obs["adj_matrix"][b_idx_node, parent_node, child_node] = True
-            
+            # (T에도 엣지 추가: (child_node) -> (parent_node))
+            next_obs["adj_matrix_T"][b_idx_node, child_node, parent_node] = True
+
             # 3b. '독립 레일' 상태 전파 (자식 -> 부모)
             child_status = next_obs["is_exclusive_mask"][b_idx_node, child_node] # (B_node,)
             if (child_status > 0).any():
@@ -408,7 +427,8 @@ class PocatEnv(EnvBase):
         if td["step_count"].min() > 0 or head_is_node.any():
             final_i_out, power_loss, new_temp = self._calculate_tree_loads(
                 next_obs["nodes"], 
-                next_obs["adj_matrix"]
+                next_obs["adj_matrix"],
+                next_obs["adj_matrix_T"] # 💡 adj_matrix_T 전달
             )
             next_obs["nodes"][..., FEATURE_INDEX["current_out"]] = final_i_out
             next_obs["nodes"][..., FEATURE_INDEX["junction_temp"]] = new_temp
@@ -492,7 +512,7 @@ class PocatEnv(EnvBase):
     # 섹션 5: 액션 마스킹 (연산 집약적)
     # ---
     
-    def get_action_mask(self, td: TensorDict) -> Dict[str, torch.Tensor]:
+    def get_action_mask(self, td: TensorDict, debug: bool = False) -> Dict[str, torch.Tensor]:
         """
         현재 상태(td)에서 가능한 모든 액션을 계산하여
         3종류의 마스크 딕셔너리를 반환합니다.
@@ -511,11 +531,13 @@ class PocatEnv(EnvBase):
         
         # --- 1. 기본 상태 마스크 (저비용) ---
         is_active = td["is_active_mask"] # (B, N_max) - 현재 활성 노드
-        is_template = td["nodes"][..., FEATURE_INDEX["is_template"]].bool() # (B, N_max)
+        is_template = td["is_template_mask"] # (B, N_max) - 템플릿 노드
         
         # --- 2. [Select New Load] 모드 마스킹 ---
         head_is_battery = (current_head == BATTERY_NODE_IDX)
-        
+        if debug:
+            reasons = {}
+
         # (B, 2)
         mask_type = torch.zeros(batch_size, 2, dtype=torch.bool, device=self.device)
         # (B, N_max)
@@ -539,6 +561,10 @@ class PocatEnv(EnvBase):
                 b_idx_finish = b_idx_batt[all_connected]
                 mask_connect[b_idx_finish, BATTERY_NODE_IDX] = True
         
+            if debug:
+                reasons["mask_type"] = mask_type[b_idx_batt]
+                reasons["mask_connect"] = mask_connect[b_idx_batt]
+
         # --- 3. [Find Parent / Spawn] 모드 마스킹 (고비용) ---
         head_is_node = ~head_is_battery
         if head_is_node.any():
@@ -553,20 +579,23 @@ class PocatEnv(EnvBase):
             volt_ok = connectivity[torch.arange(B_act), :, child_nodes]
             
             # (B_act, N_max)
-            path_mask = self._trace_path_batch(child_nodes, td["adj_matrix"][b_idx_node])
-            cycle_ok = ~path_mask
-            
+            path_mask = self._trace_path_batch(child_nodes, td["adj_matrix_T"][b_idx_node])
+            cycle_ok = ~path_mask            
+
+
             # (B_act, N_max)
             exclusive_ok = self._get_exclusive_mask(
-                td["is_exclusive_mask"][b_idx_node],
-                td["adj_matrix"][b_idx_node],
+                td,           # 💡 'td' 전달
+                b_idx_node,   # 💡 'b_idx_node' 전달
                 child_nodes
             )
             
             # (B_act, N_max)
             power_seq_ok = self._get_power_sequence_mask(
                 td["adj_matrix"][b_idx_node],
-                child_nodes
+                child_nodes,
+                td,           
+                b_idx_node    
             )
             
             # (B_act, N_max) - 모든 저비용 제약을 통과한 후보
@@ -602,42 +631,71 @@ class PocatEnv(EnvBase):
             mask_type[b_idx_node, 0] = can_connect
             mask_type[b_idx_node, 1] = can_spawn
             
+            if debug:
+                # (디버그 정보는 b_idx_node[0] (0번 샘플) 기준으로만 수집)
+                if 0 in b_idx_node:
+                    reasons["volt_ok"] = volt_ok[0]
+                    reasons["cycle_ok"] = cycle_ok[0]
+                    reasons["exclusive_ok"] = exclusive_ok[0]
+                    reasons["power_seq_ok"] = power_seq_ok[0]
+                    reasons["base_valid_parents"] = base_valid_parents[0]
+                    reasons["thermal_current_ok"] = thermal_current_ok[0]
+                    reasons["final_valid_parents"] = final_valid_parents[0]
+
         return {
             "mask_type": mask_type,
             "mask_connect": mask_connect,
             "mask_spawn": mask_spawn,
         }
 
+        if debug:
+            return {
+                "mask_type": mask_type,
+                "mask_connect": mask_connect,
+                "mask_spawn": mask_spawn,
+                "reasons": reasons # 디버그 정보 반환
+            }
+        else:
+            return {
+                "mask_type": mask_type,
+                "mask_connect": mask_connect,
+                "mask_spawn": mask_spawn,
+            }
+
     # ---
     # 섹션 6: 마스킹 헬퍼 함수 (V6 로직 벡터화/적응)
     # ---
 
-    def _trace_path_batch(self, start_nodes: torch.Tensor, adj_matrix: torch.Tensor) -> torch.Tensor:
+    def _trace_path_batch(self, start_nodes: torch.Tensor, adj_matrix_T: torch.Tensor) -> torch.Tensor:
         """ (V6 계승) start_nodes의 모든 조상(ancestors)을 찾아 마스크로 반환 (사이클 방지용) """
-        batch_size, num_nodes, _ = adj_matrix.shape
+        batch_size, num_nodes, _ = adj_matrix_T.shape
         path_mask = torch.zeros(batch_size, num_nodes, dtype=torch.bool, device=self.device)
 
         if start_nodes.numel() > 0:
             path_mask.scatter_(1, start_nodes.unsqueeze(-1), True)
         
-        adj_matrix_T = adj_matrix.transpose(-1, -2).float() # (p <- c)
+        adj_matrix_T_float = adj_matrix_T.float()
 
         for _ in range(num_nodes):
             # (B,N,N) @ (B,N,1) -> (B,N)
-            parents_mask = (adj_matrix_T @ path_mask.float().unsqueeze(-1)).squeeze(-1).bool()
+            parents_mask = (adj_matrix_T_float @ path_mask.float().unsqueeze(-1)).squeeze(-1).bool()
             if (parents_mask & ~path_mask).sum() == 0: break
             path_mask |= parents_mask
             
         return path_mask
 
     def _get_exclusive_mask(self, 
-                            is_exclusive_mask_batch: torch.Tensor, 
-                            adj_matrix_batch: torch.Tensor, 
-                            child_nodes: torch.Tensor) -> torch.Tensor:
+                            td: TensorDict,           # 💡 'td' 인자 추가
+                            b_idx_node: torch.Tensor, # 💡 'b_idx_node' 인자 추가
+                            child_nodes: torch.Tensor
+                            ) -> torch.Tensor:
         """ (V6 계승) 독립 레일(Exclusive Rail) 제약조건 마스크 생성 """
+        # (td와 b_idx_node에서 필요한 텐서를 가져옴)
+        is_exclusive_mask_batch = td["is_exclusive_mask"][b_idx_node]
+        adj_matrix_batch = td["adj_matrix"][b_idx_node]
         B_act, N_nodes = is_exclusive_mask_batch.shape
         
-        # 1. Head(Child)의 상태
+        # 1. Head(Child)의 상태adj_matrix_T
         head_status = is_exclusive_mask_batch[torch.arange(B_act), child_nodes] # (B_act,)
         head_is_load = (self.node_type_tensor[child_nodes] == NODE_TYPE_LOAD) # (B_act,)
 
@@ -670,12 +728,14 @@ class PocatEnv(EnvBase):
 
     def _get_power_sequence_mask(self,
                                  adj_matrix_batch: torch.Tensor,
-                                 child_nodes: torch.Tensor) -> torch.Tensor:
-        """ (V6 계승) 전원 시퀀싱(Power Sequence) 제약조건 마스크 생성 """
+                                 child_nodes: torch.Tensor,
+                                 td: TensorDict,           
+                                 b_idx_node: torch.Tensor  
+                                 ) -> torch.Tensor:
+        """ 전원 시퀀싱(Power Sequence) 제약조건 마스크 생성 """
         B_act, N_nodes, _ = adj_matrix_batch.shape
+        adj_matrix_T_batch = td["adj_matrix_T"][b_idx_node]
         candidate_mask = torch.ones(B_act, N_nodes, dtype=torch.bool, device=self.device)
-        
-        adj_matrix_T = adj_matrix_batch.transpose(-1, -2) # (p <- c)
 
         for j_idx, k_idx, f_flag in self.power_sequences:
             # Case 1: 현재 child가 'k' (j의 부모를 찾는 중)
@@ -693,7 +753,7 @@ class PocatEnv(EnvBase):
                     parent_of_j_idx = adj_matrix_batch[b_constr, :, j_idx].long().argmax(-1) # (B_constr,)
                     
                     # 'j'의 부모(parent_of_j)의 모든 조상(ancestors)을 찾음
-                    anc_mask = self._trace_path_batch(parent_of_j_idx, adj_matrix_batch[b_constr])
+                    anc_mask = self._trace_path_batch(parent_of_j_idx, adj_matrix_T_batch[b_constr])
                     anc_mask[:, BATTERY_NODE_IDX] = False # 배터리 제외
                     
                     # 'k'의 부모는 'j'의 조상이 될 수 없음
@@ -714,7 +774,7 @@ class PocatEnv(EnvBase):
                     b_constr = b_idx_check[parent_of_k_exists]
                     parent_of_k_idx = adj_matrix_batch[b_constr, :, k_idx].long().argmax(-1)
                     
-                    anc_mask = self._trace_path_batch(parent_of_k_idx, adj_matrix_batch[b_constr])
+                    anc_mask = self._trace_path_batch(parent_of_k_idx, adj_matrix_T_batch[b_constr])
                     anc_mask[:, BATTERY_NODE_IDX] = False
                     
                     # 'j'의 부모는 'k'의 조상이 될 수 없음
@@ -746,6 +806,7 @@ class PocatEnv(EnvBase):
         
         base_nodes = td["nodes"][b_idx_node]
         base_adj_matrix = td["adj_matrix"][b_idx_node]
+        base_adj_matrix_T = td["adj_matrix_T"][b_idx_node]
         
         # 마진(Margin) 값 미리 로드
         margin_I = float(self.generator.config.constraints.get("current_margin", 0.0))
@@ -773,6 +834,7 @@ class PocatEnv(EnvBase):
             # 1. 시뮬레이션 데이터 준비 (N_sim,)
             sim_nodes = base_nodes[b_idx_sim_chunk]
             sim_adj_matrix = base_adj_matrix[b_idx_sim_chunk].clone()
+            sim_adj_matrix_T = base_adj_matrix_T[b_idx_sim_chunk].clone()
             sim_child_nodes = child_nodes[b_idx_sim_chunk]
             
             # (N_sim,) - 실제 부모 노드 인덱스
@@ -781,10 +843,13 @@ class PocatEnv(EnvBase):
             # 2. (가상) 엣지 추가: (parent) -> (child)
             sim_rows = torch.arange(N_sim, device=self.device)
             sim_adj_matrix[sim_rows, sim_parent_indices_global, sim_child_nodes] = True
-            
+            sim_adj_matrix_T[sim_rows, sim_child_nodes, sim_parent_indices_global] = True
+
             # 3. 🚀 트리 전체 부하 시뮬레이션
             (final_i_out, power_loss, junction_temp) = self._calculate_tree_loads(
-                sim_nodes, sim_adj_matrix
+                sim_nodes, 
+                sim_adj_matrix,
+                sim_adj_matrix_T # 💡 T 매트릭스 전달
             )
 
             # 4. 시뮬레이션 결과 검증
@@ -823,7 +888,8 @@ class PocatEnv(EnvBase):
 
     def _calculate_tree_loads(self, 
                               nodes_tensor: torch.Tensor, 
-                              adj_matrix: torch.Tensor
+                              adj_matrix: torch.Tensor,
+                              adj_matrix_T: torch.Tensor
                               ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """ (V6 계승) Adjacency Matrix를 기반으로 트리 전체의 전류/전력손실/온도를 계산합니다. """
         
@@ -832,11 +898,13 @@ class PocatEnv(EnvBase):
         # 1. 초기 수요 = Load의 활성 전류
         current_demands = nodes_tensor[..., FEATURE_INDEX["current_active"]].clone()
         
-        ic_mask_b_n = (self.node_type_tensor == NODE_TYPE_IC) # (N_max,)
-        current_demands[:, ~ic_mask_b_n] = 0.0 # IC가 아닌 노드의 수요는 0
+        # Load가 아닌 노드는 초기 수요가 0
+        load_mask_1d = (self.node_type_tensor == NODE_TYPE_LOAD) # (N_max,)
+        current_demands[:, ~load_mask_1d] = 0.0
         
         adj_matrix_float = adj_matrix.float()
-        
+        adj_matrix_T_float = adj_matrix_T.float()
+
         # (IC 타입, LDO/Buck)
         ic_type = nodes_tensor[..., FEATURE_INDEX["ic_type_idx"]]
         ldo_mask_b = torch.isclose(ic_type, torch.tensor(1.0, device=ic_type.device))
@@ -846,30 +914,33 @@ class PocatEnv(EnvBase):
         vout = nodes_tensor[..., FEATURE_INDEX["vout_min"]] # (고정 Vout)
         vin = nodes_tensor[..., FEATURE_INDEX["vin_min"]]  # (고정 Vin)
         safe_vin = torch.where(vin > 0, vin, 1e-6)
-        
-        i_out = torch.zeros_like(current_demands)
+        eff = 0.9 # (고정 효율)
 
         # 2. 전류 전파 (Bottom-up)
+        # (i_in_total은 (B, N_max)로, 각 노드가 *소비*하는 총 전류)
+        i_in_total = current_demands.clone() 
+
         for _ in range(num_nodes):
+            # i_out (B, N_max) = 이 노드가 자식들에게 *공급*해야 하는 총 전류
             # i_out = (B,N,N) @ (B,N,1) -> (B,N)
-            i_out = (adj_matrix_float @ current_demands.unsqueeze(-1)).squeeze(-1)
-            
-            # LDO 입력 전류: I_in = I_out + I_op
+            i_out = (adj_matrix_float @ i_in_total.unsqueeze(-1)).squeeze(-1)            
+
+            # I_in_ldo/buck (B, N_max) = 이 노드가 *공급*하기 위해 *소비*해야 하는 전류
             i_in_ldo = i_out + op_current
             
             # Buck 입력 전류: I_in = P_out / (Eff * V_in) + I_op
             p_out_buck = vout * i_out
-            eff = 0.9 # (고정 효율)
             i_in_buck = (p_out_buck / eff) / safe_vin + op_current
             
-            new_demands = current_demands.clone()
-            new_demands[ldo_mask_b] = i_in_ldo[ldo_mask_b]
-            new_demands[buck_mask_b] = i_in_buck[buck_mask_b]
-            
-            # (수렴 시 중단)
-            if torch.allclose(current_demands, new_demands, atol=1e-8):
+            # (B, N_max) - IC 노드들의 총 입력 수요
+            new_ic_demands = torch.zeros_like(i_in_total)
+            new_ic_demands[ldo_mask_b] = i_in_ldo[ldo_mask_b]
+            new_ic_demands[buck_mask_b] = i_in_buck[buck_mask_b]
+
+            new_i_in_total = current_demands + new_ic_demands
+            if torch.allclose(i_in_total, new_i_in_total, atol=1e-8):
                 break
-            current_demands = new_demands
+            i_in_total = new_i_in_total
             
         # 3. 최종 손실 및 온도 계산
         power_loss = self._calculate_power_loss(
@@ -913,7 +984,7 @@ class PocatEnv(EnvBase):
         
         batch_size, num_nodes, _ = td["nodes"].shape
         adj_matrix = td["adj_matrix"].float()
-        adj_matrix_T = adj_matrix.transpose(-1, -2) # (c, p) -> (p, c)
+        adj_matrix_T = td["adj_matrix_T"].float() # 💡 (c, p) -> (p, c)
 
         # 1. "Always-On" 상태 전파 (Load -> Battery)
         always_on_loads = (td["nodes"][..., FEATURE_INDEX["always_on_in_sleep"]] == 1.0)
@@ -958,7 +1029,7 @@ class PocatEnv(EnvBase):
         eff_sleep = 0.35 # (고정 효율)
         
         for _ in range(num_nodes):
-            i_out_sleep = (adj_matrix_float @ current_demands_sleep.unsqueeze(-1)).squeeze(-1)
+            i_out_sleep = (adj_matrix_T.transpose(-1, -2) @ current_demands_sleep.unsqueeze(-1)).squeeze(-1)
             
             new_demands_sleep = load_sleep_draw + ic_self_sleep
             

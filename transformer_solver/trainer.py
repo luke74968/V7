@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.utils.data import DataLoader
+from tensordict import TensorDict
 
 from tqdm import tqdm
 import os

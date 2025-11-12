@@ -62,18 +62,11 @@ def run_interactive_debugger(config_file: str, n_max: int):
         
         # 2. [V7] 3종 마스크 및 디버그 정보 가져오기
         #    (solver_env.py의 get_action_mask가 debug=True를 지원한다고 가정)
-        try:
-            mask_info = env.get_action_mask(td, debug=True)
-            masks = {k: v[0] for k, v in mask_info.items() if "mask_" in k}
-            reasons = mask_info.get("reasons", {})
-        except TypeError:
-            # (debug=True가 구현되지 않은 경우, 기본 마스크만 호출)
-            masks = env.get_action_mask(td)
-            masks = {k: v[0] for k, v in masks.items()} # (B=1 제거)
-            reasons = {}
-            print(" (Running without debug reasons) ")
 
-        # 3. [V7] Action Type 마스크 출력
+        mask_info = env.get_action_mask(td, debug=True)
+        masks = {k: v[0] for k, v in mask_info.items() if "mask_" in k} # (B=1 제거)
+        reasons = {k: v for k, v in mask_info.get("reasons", {}).items()}        # 3. [V7] Action Type 마스크 출력
+
         mask_type = masks["mask_type"] # (2,)
         can_connect = mask_type[0].item()
         can_spawn = mask_type[1].item()
@@ -106,7 +99,14 @@ def run_interactive_debugger(config_file: str, n_max: int):
             print("\n  --- (Mode: Connect) ---")
             mask_connect = masks["mask_connect"] # (N_max,)
             valid_indices = torch.where(mask_connect)[0]
-            
+
+            # (디버그 정보 출력)
+            print("  --- Reasons (Connect) ---")
+            print(f"  base_valid_parents (저비용): {torch.where(reasons.get('base_valid_parents', torch.tensor([])))[0].tolist()}")
+            print(f"  thermal_current_ok (고비용): {torch.where(reasons.get('thermal_current_ok', torch.tensor([])))[0].tolist()}")
+            print(f"  is_active (상태): {torch.where(td['is_active_mask'][0])[0].tolist()}")
+            print("  ---------------------------")
+
             print(f"  Valid Connect Targets ({len(valid_indices)}):")
             valid_actions_map = {}
             for idx in valid_indices:
@@ -131,6 +131,13 @@ def run_interactive_debugger(config_file: str, n_max: int):
             print("\n  --- (Mode: Spawn) ---")
             mask_spawn = masks["mask_spawn"] # (N_max,)
             valid_indices = torch.where(mask_spawn)[0]
+
+            # (디버그 정보 출력)
+            print("  --- Reasons (Spawn) ---")
+            print(f"  base_valid_parents (저비용): {torch.where(reasons.get('base_valid_parents', torch.tensor([])))[0].tolist()}")
+            print(f"  thermal_current_ok (고비용): {torch.where(reasons.get('thermal_current_ok', torch.tensor([])))[0].tolist()}")
+            print(f"  is_template (상태): {torch.where(td['is_template_mask'][0])[0].tolist()}")
+            print("  ---------------------------")
             
             print(f"  Valid Spawn Templates ({len(valid_indices)}):")
             valid_actions_map = {}
