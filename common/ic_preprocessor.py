@@ -40,54 +40,7 @@ from typing import List, Dict, Tuple, Any
 from .data_classes import Battery, Load, PowerIC, LDO, BuckConverter
 
 # ---
-# 1. 공용 헬퍼 함수: 열 제약(Thermal) 계산
-# ---
-
-def calculate_derated_current_limit(ic: PowerIC, constraints: Dict[str, Any]) -> float:
-    """
-    IC의 열(Thermal) 제약조건을 고려하여 실제 사용 가능한 전류 한계(derated limit)를 계산합니다.
-    PowerIC 객체 (ic.vin, ic.vout이 설정된)를 입력으로 받습니다.
-    """
-    ambient_temp = constraints.get('ambient_temperature', 25)
-    thermal_margin_percent = constraints.get('thermal_margin_percent', 0)
-    
-    if ic.theta_ja == 0:
-        return ic.original_i_limit
-
-    temp_rise_allowed = ic.t_junction_max - ambient_temp
-    if temp_rise_allowed <= 0:
-        return 0.0
-    
-    p_loss_max = (temp_rise_allowed / (ic.theta_ja * (1 + thermal_margin_percent)))
-    i_limit_based_temp = ic.original_i_limit
-    
-    if isinstance(ic, LDO):
-        vin, vout = ic.vin, ic.vout
-        op_current = ic.operating_current
-        numerator = p_loss_max - (vin * op_current)
-        denominator = vin - vout
-        if denominator > 0 and numerator > 0:
-            i_limit_based_temp = numerator / denominator
-            
-    elif isinstance(ic, BuckConverter):
-        # V이진 탐색 로직, 고정 효율 0.9 사용
-        low, high = 0.0, ic.original_i_limit
-        i_limit_based_temp = 0.0
-        for _ in range(100):
-            mid = (low + high) / 2
-            if mid < 1e-6: break
-            power_loss_at_mid = ic.calculate_power_loss(ic.vin, mid) # 90% 고정 효율
-            if power_loss_at_mid <= p_loss_max:
-                i_limit_based_temp = mid
-                low = mid
-            else:
-                high = mid
-                
-    # 원본 스펙 한계와 열 제약 한계 중 *더 작은* 값을 실제 한계로 반환
-    return min(ic.original_i_limit, i_limit_based_temp)
-
-# ---
-# 2. OR-Tools용: 모든 복제본 '인스턴스' 생성
+# 1. OR-Tools용: 모든 복제본 '인스턴스' 생성
 # ---
 
 def expand_ic_instances(
@@ -95,19 +48,28 @@ def expand_ic_instances(
     loads: List[Load], 
     battery: Battery, 
     constraints: Dict[str, Any]
-) -> List[PowerIC]:
+) -> Tuple[List[PowerIC], Dict[str, List[str]]]:
     """
+    [OR-Tools용]
     모든 유효한 (Vin, Vout) 조합과 Load 수량, 독점(Exclusive) 제약을
     고려하여 `_copy1`, `_copy2`... 등 모든 '특화 인스턴스'를 미리 생성합니다.
+    
+    Returns:
+        Tuple[List[PowerIC], Dict[str, List[str]]]:
+            1. candidate_ics: 생성된 모든 '특화 인스턴스' 객체 리스트
+            2. ic_groups: `_copy`로 묶인 IC 이름 그룹 
     """
     
-    print("⚙️ OR-Tools용: IC 인스턴스 확장 시작...")
+    print("⚙️ (OR-Tools용): IC 인스턴스 확장 시작...")
     
     potential_vout = sorted(list(set(load.voltage_typical for load in loads)))
     battery.vout = (battery.voltage_min + battery.voltage_max) / 2
     potential_vin = sorted(list(set([battery.vout] + potential_vout)))
     
     candidate_ics = []
+    
+    # ic_groups 딕셔너리 초기화 
+    ic_groups = {} 
     
     # 로직: 독점 레일용 추가 복제본 수 계산
     exclusive_loads_per_vout = defaultdict(int)
@@ -138,7 +100,11 @@ def expand_ic_instances(
 
                 group_key = f"{template_ic.name}@{vin:.1f}Vin_{vout:.1f}Vout"
                 
+                # 현재 그룹 리스트 초기화
+                current_group = []
+                
                 for i in range(num_to_create):
+                    # 템플릿 복제 및 '특화'
                     concrete_ic = copy.deepcopy(template_ic)
                     concrete_ic.vin, concrete_ic.vout = vin, vout
                     concrete_ic.name = f"{group_key}_copy{i+1}"
@@ -149,12 +115,20 @@ def expand_ic_instances(
                     if derated_limit > 0:
                         concrete_ic.i_limit = derated_limit
                         candidate_ics.append(concrete_ic)
+                        # 그룹에 IC 이름 추가
+                        current_group.append(concrete_ic.name)
+                
+                # 그룹 정보 저장 
+                if current_group:
+                    ic_groups[group_key] = current_group
                         
-    print(f"   - OR-Tools용: 생성된 특화 IC 인스턴스 (Pruning 전): {len(candidate_ics)}개")
-    return candidate_ics
+    print(f"   - (OR-Tools용): 생성된 특화 IC 인스턴스 (Pruning 전): {len(candidate_ics)}개")
+    
+    # ic_groups 딕셔너리 반환
+    return candidate_ics, ic_groups
 
 # ---
-# 3. Transformer용: '템플릿' 생성 (Lazy Spawn)
+# 2. Transformer용: '템플릿' 생성 (Lazy Spawn)
 # ---
 
 def expand_ic_templates(
@@ -206,6 +180,55 @@ def expand_ic_templates(
     final_templates = list(template_ics.values())
     print(f"   - Transformer용: 생성된 고유 IC 템플릿 (Pruning 전): {len(final_templates)}개")
     return final_templates
+
+
+# ---
+# 3. 공용 헬퍼 함수: 열 제약(Thermal) 계산
+# ---
+
+def calculate_derated_current_limit(ic: PowerIC, constraints: Dict[str, Any]) -> float:
+    """
+    IC의 열(Thermal) 제약조건을 고려하여 실제 사용 가능한 전류 한계(derated limit)를 계산합니다.
+    PowerIC 객체 (ic.vin, ic.vout이 설정된)를 입력으로 받습니다.
+
+    """
+    ambient_temp = constraints.get('ambient_temperature', 25)
+    thermal_margin_percent = constraints.get('thermal_margin_percent', 0)
+    
+    if ic.theta_ja == 0:
+        return ic.original_i_limit
+
+    temp_rise_allowed = ic.t_junction_max - ambient_temp
+    if temp_rise_allowed <= 0:
+        return 0.0
+    
+    p_loss_max = (temp_rise_allowed / (ic.theta_ja * (1 + thermal_margin_percent)))
+    i_limit_based_temp = ic.original_i_limit
+    
+    if isinstance(ic, LDO):
+        vin, vout = ic.vin, ic.vout
+        op_current = ic.operating_current
+        numerator = p_loss_max - (vin * op_current)
+        denominator = vin - vout
+        if denominator > 0 and numerator > 0:
+            i_limit_based_temp = numerator / denominator
+            
+    elif isinstance(ic, BuckConverter):
+        # 이진 탐색 로직 (고정 효율 0.9 사용)
+        low, high = 0.0, ic.original_i_limit
+        i_limit_based_temp = 0.0
+        for _ in range(100):
+            mid = (low + high) / 2
+            if mid < 1e-6: break
+            power_loss_at_mid = ic.calculate_power_loss(ic.vin, mid) # 90% 고정 효율
+            if power_loss_at_mid <= p_loss_max:
+                i_limit_based_temp = mid
+                low = mid
+            else:
+                high = mid
+                
+    # 원본 스펙 한계와 열 제약 한계 중 *더 작은* 값을 실제 한계로 반환
+    return min(ic.original_i_limit, i_limit_based_temp)
 
 # ---
 # 4. 공용 헬퍼 함수: '지배당하는' (Dominated) IC 제거

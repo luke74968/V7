@@ -71,7 +71,7 @@ class PowerIC:
     vin_max: float
     vout_min: float
     vout_max: float
-    original_i_limit: float = 0.0 # JSON('i_limit')에서 직접 로드되는 '원본 스펙' 값입니다.
+    original_i_limit: float   # JSON('i_limit')에서 직접 로드되는 '원본 스펙' 값입니다.
     operating_current: float  # IC 자체의 동작 전류 (Iop)
     quiescent_current: float  # IC 자체의 대기 전류 (Iq)
     cost: float
