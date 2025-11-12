@@ -263,6 +263,7 @@ class PocatEnv(EnvBase):
         next_obs["nodes"] = td["nodes"].clone() # (가장 중요)
         next_obs["adj_matrix"] = td["adj_matrix"].clone()
         next_obs["adj_matrix_T"] = td["adj_matrix_T"].clone()
+        next_obs["connectivity_matrix"] = td["connectivity_matrix"].clone()
         next_obs["is_active_mask"] = td["is_active_mask"].clone()
         next_obs["is_template_mask"] = td["is_template_mask"].clone()
         next_obs["can_spawn_into_mask"] = td["can_spawn_into_mask"].clone()
@@ -341,7 +342,13 @@ class PocatEnv(EnvBase):
                 
                 # 1. Spawn: 템플릿 피처 -> 빈 슬롯으로 복사
                 template_features = next_obs["nodes"][b_idx_spawn, template_idx]
-                next_obs["nodes"][b_idx_spawn, slot_idx] = template_features.detach()                
+                next_obs["nodes"][b_idx_spawn, slot_idx] = template_features.detach()
+
+                # Spawn된 슬롯은 템플릿과 동일한 전압 호환성을 가져야 하므로
+                # connectivity_matrix의 행/열을 템플릿에서 복사한다.
+                connectivity_matrix = next_obs["connectivity_matrix"]
+                connectivity_matrix[b_idx_spawn, :, slot_idx] = connectivity_matrix[b_idx_spawn, :, template_idx]
+                connectivity_matrix[b_idx_spawn, slot_idx, :] = connectivity_matrix[b_idx_spawn, template_idx, :]
 
                 # 2. 상태 변경: (Template -> Active)
                 next_obs["nodes"][b_idx_spawn, slot_idx, FEATURE_INDEX["is_active"]] = 1.0
@@ -941,6 +948,8 @@ class PocatEnv(EnvBase):
             if torch.allclose(i_in_total, new_i_in_total, atol=1e-8):
                 break
             i_in_total = new_i_in_total
+
+        i_out = (adj_matrix_float @ i_in_total.unsqueeze(-1)).squeeze(-1)
             
         # 3. 최종 손실 및 온도 계산
         power_loss = self._calculate_power_loss(

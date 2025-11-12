@@ -5,7 +5,7 @@ import argparse
 import sys
 import os
 import pprint # (딕셔너리 출력을 위해)
-from typing import List
+from typing import Dict, List
 
 # (common을 참조하므로, 프로젝트 루트 경로를 sys.path에 추가)
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -20,6 +20,9 @@ from transformer_solver.definitions import (
 def get_node_name(idx: int, node_names: List[str]) -> str:
     """ 인덱스에 해당하는 노드 이름을 안전하게 반환합니다. """
     if 0 <= idx < len(node_names):
+        name = node_names[idx]
+        if name:
+            return name
         return node_names[idx]
     if idx == -1:
         return "N/A"
@@ -41,9 +44,16 @@ def run_interactive_debugger(config_file: str, n_max: int):
     )
     td = env.reset(batch_size=1)
     
-    node_names = env.generator.config.node_names
+    static_node_names = env.generator.config.node_names
     num_nodes = env.N_max
-    node_name_to_idx = {name: i for i, name in enumerate(node_names)}
+    node_name_to_idx = {name: i for i, name in enumerate(static_node_names)}
+
+    # Debug용으로 동적으로 스폰된 IC 이름을 추적하기 위한 버퍼.
+    dynamic_node_names: List[str] = list(static_node_names)
+    if len(dynamic_node_names) < num_nodes:
+        dynamic_node_names.extend([None] * (num_nodes - len(dynamic_node_names)))
+    spawn_name_counter: Dict[str, int] = {}
+
 
     print("="*60)
     print(f"🚀 V7 POCAT Interactive Debugger (N_MAX={n_max}) 🚀")
@@ -56,7 +66,7 @@ def run_interactive_debugger(config_file: str, n_max: int):
     while not td["done"].all():
         step += 1
         current_head_idx = td["trajectory_head"].item()
-        current_head_name = get_node_name(current_head_idx, node_names)
+        current_head_name = get_node_name(current_head_idx, dynamic_node_names)
         
         print(f"\n--- Step {step} (Head: {current_head_name} [idx:{current_head_idx}]) ---")
         
@@ -110,7 +120,7 @@ def run_interactive_debugger(config_file: str, n_max: int):
             print(f"  Valid Connect Targets ({len(valid_indices)}):")
             valid_actions_map = {}
             for idx in valid_indices:
-                name = get_node_name(idx.item(), node_names)
+                name = get_node_name(idx.item(), dynamic_node_names)
                 print(f"    - {name} (idx: {idx.item()})")
                 valid_actions_map[name.lower()] = idx.item()
                 valid_actions_map[str(idx.item())] = idx.item()
@@ -142,7 +152,7 @@ def run_interactive_debugger(config_file: str, n_max: int):
             print(f"  Valid Spawn Templates ({len(valid_indices)}):")
             valid_actions_map = {}
             for idx in valid_indices:
-                name = get_node_name(idx.item(), node_names)
+                name = get_node_name(idx.item(), dynamic_node_names)
                 print(f"    - {name} (idx: {idx.item()})")
                 valid_actions_map[name.lower()] = idx.item()
                 valid_actions_map[str(idx.item())] = idx.item()
@@ -165,6 +175,18 @@ def run_interactive_debugger(config_file: str, n_max: int):
             "spawn_template": torch.tensor([[action_spawn_idx]], device=device),
         }
         
+        if action_type == 1:
+            slot_idx = td["next_empty_slot_idx"].item()
+            template_idx = action_spawn_idx
+            if 0 <= template_idx < len(static_node_names):
+                base_name = static_node_names[template_idx]
+            else:
+                base_name = get_node_name(template_idx, dynamic_node_names)
+            spawn_name_counter[base_name] = spawn_name_counter.get(base_name, 0) + 1
+            display_name = f"{base_name}#{spawn_name_counter[base_name]}"
+            if 0 <= slot_idx < len(dynamic_node_names):
+                dynamic_node_names[slot_idx] = display_name
+
         td.set("action", action_dict)
         output = env.step(td)
         td = output["next"]
