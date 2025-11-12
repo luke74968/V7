@@ -32,7 +32,8 @@ python3 -m or_tools_solver.main configs/config_6.json --max_sleep_current 0.001
 ## 3. Transformer Solver (V7) 실행
 # 사용할 GPU를 2번과 3번으로 지정
 export CUDA_VISIBLE_DEVICES=2,3
-
+# 1초 간격으로 nvidia-smi 결과를 새로고침하며 보여줍니다.
+watch -n 1 nvidia-smi
 
 ### 훈련 (Training)
 
