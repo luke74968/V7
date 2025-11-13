@@ -12,7 +12,7 @@ import os
 import time
 from datetime import datetime
 import logging
-from collections import defaultdict
+from collections import defaultdict, Counter
 import json
 
 # --- 핵심 모듈 임포트 ---
@@ -502,11 +502,6 @@ class PocatTrainer:
         최종 TensorDict 상태를 기반으로 파워트리 시각화(PNG)를 저장합니다.
         (V6 OR-Tools 수준의 상세 정보를 포함하도록 수정됨)
         """
-        # --- (필요한 import는 파일 상단에 이미 있다고 가정) ---
-        from collections import defaultdict
-        from graphviz import Digraph
-        from common.data_classes import LDO, BuckConverter # V7 data_classes에서 IC 클래스 import
-        from .definitions import FEATURE_INDEX # FEATURE_INDEX import
 
         if self.result_dir is None: return
         os.makedirs(self.result_dir, exist_ok=True)
@@ -518,10 +513,39 @@ class PocatTrainer:
         battery_conf = self.env.generator.config.battery
         constraints = self.env.generator.config.constraints
 
+        all_nodes_features = final_td["nodes"].squeeze(0)
+        is_active_mask = final_td["is_active_mask"].squeeze(0)
+
+        # --- Spawn된 슬롯의 이름을 템플릿 기반으로 생성 ---
+        dynamic_node_names = list(node_names)
+        if len(dynamic_node_names) < self.env.N_max:
+            dynamic_node_names.extend([None] * (self.env.N_max - len(dynamic_node_names)))
+
+        spawn_name_counter: Counter = Counter()
+        for idx in range(len(node_names), self.env.N_max):
+            if idx >= len(is_active_mask) or not is_active_mask[idx]:
+                continue
+
+            node_feat = all_nodes_features[idx]
+            node_id_val = node_feat[FEATURE_INDEX["node_id"]].item()
+            template_idx = int(round(node_id_val * self.env.N_max))
+
+            if 0 <= template_idx < len(node_names):
+                base_name = node_names[template_idx]
+            else:
+                base_name = f"Spawned_Template_{template_idx}"
+
+            spawn_name_counter[base_name] += 1
+            dynamic_node_names[idx] = f"{base_name}#{spawn_name_counter[base_name]}"
+
         # --- Safe Name Lookup Helper ---
         def get_node_name_safe(idx: int) -> str:
-            if 0 <= idx < len(node_names):
-                return node_names[idx]
+            if 0 <= idx < len(dynamic_node_names):
+                name = dynamic_node_names[idx]
+                if name:
+                    return name
+            if idx == -1:
+                return "N/A"
             return f"Spawned_IC_{idx}"
         # --- Safe Name Lookup Helper ---
 
@@ -582,13 +606,13 @@ class PocatTrainer:
         active_current_draw = {name: conf["current_active"] for name, conf in loads_map.items()}
         sleep_current_draw = {name: conf["current_sleep"] for name, conf in loads_map.items()}
 
-        all_nodes_features = final_td["nodes"].squeeze(0)
+        node_types = all_nodes_features[..., FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
         is_active = final_td["is_active_mask"].squeeze(0)
         active_indices = torch.where(is_active)[0]
-        
+
         active_ics_indices = [
-            idx.item() for idx in active_indices 
-            if get_node_name_safe(idx.item()).startswith(('Buck', 'LDO', 'Spawned_IC'))
+            idx.item() for idx in active_indices
+            if node_types[idx] == NODE_TYPE_IC
         ]
         
         processed_ics = set()
@@ -600,7 +624,7 @@ class PocatTrainer:
                 ic_name = get_node_name_safe(ic_idx)
                 if ic_name in processed_ics: continue
 
-                if ic_name.startswith("Spawned_IC"):
+                if ic_name not in candidate_ics_map:
                     node_feat = all_nodes_features[ic_idx]
                     ic_type_idx = node_feat[FEATURE_INDEX["ic_type_idx"]].item()
                     ic_type = 'LDO' if ic_type_idx == 1.0 else 'Buck'
@@ -704,7 +728,7 @@ class PocatTrainer:
         for ic_idx in active_ics_indices:
             ic_name = get_node_name_safe(ic_idx)
             
-            if ic_name.startswith("Spawned_IC"):
+            if ic_name not in candidate_ics_map:
                 node_feat = all_nodes_features[ic_idx]
                 ic_data_for_label = {
                     'name': ic_name,
