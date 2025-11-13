@@ -260,10 +260,10 @@ def print_and_visualize_one_solution(solution, candidate_ics, loads, battery, co
     today_str = now.strftime("%Y-%m-%d")
     timestamp_str = now.strftime("%H%M%S")
     
-    output_dir = os.path.join("or_tools_solver", "result", today_str)
+    output_dir = os.path.join("result_or_tools", today_str)
     os.makedirs(output_dir, exist_ok=True)
     
-    base_filename = f'V7_solution_{solution_index}_cost_{solution["cost"]:.2f}_{timestamp_str}'
+    base_filename = f'or_tools_solution_{solution_index}_cost_{solution["cost"]:.2f}_{timestamp_str}'
     output_filepath = os.path.join(output_dir, base_filename)    
     
     try:

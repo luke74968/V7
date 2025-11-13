@@ -18,8 +18,8 @@ __pycache__/
 .txt 
 
 #log.txt
-transformer_solver/result/
-or_tools_solver/result/
+result_transformer/
+result_or_tools/
 
 #zip
 *.7z

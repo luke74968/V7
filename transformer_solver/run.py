@@ -149,7 +149,7 @@ if __name__ == "__main__":
 
     # --- 결과 저장 디렉토리 및 로거 설정 ---
     args.start_time = time.strftime("%Y-%m%d-%H%M%S", time.localtime())
-    args.result_dir = os.path.join('transformer_solver', 'result', args.start_time)
+    args.result_dir = os.path.join('result_transformer', args.start_time)
     
     # (DDP 랭크 0만 디렉토리 생성 시도)
     local_rank_init = int(os.environ.get('LOCAL_RANK', 0))
