@@ -548,7 +548,8 @@ class PocatModel(nn.Module):
             
             # 2. 환경에서 3종 마스크 가져오기
             # (solver_env.py가 반환할 마스크 딕셔너리)
-            masks: Dict[str, torch.Tensor] = env.get_action_mask(td)
+            with torch.no_grad():
+                masks: Dict[str, torch.Tensor] = env.get_action_mask(td)
             
             # 3. 3개 헤드에서 각각 샘플링
             action_type, log_prob_type = self._sample_action(
@@ -575,8 +576,10 @@ class PocatModel(nn.Module):
             }
             
             # 6. 환경 스텝 실행
-            td.set("action", action_dict)
-            output_td = env.step(td)
+            with torch.no_grad():
+                td.set("action", action_dict)
+                output_td = env.step(td)
+            
             reward = output_td["reward"]
             td = output_td["next"]
             

@@ -227,6 +227,7 @@ class PocatEnv(EnvBase):
         self._ensure_buffers(reset_td)
         return reset_td
 
+    @torch.no_grad()
     def step(self, tensordict: TensorDict) -> TensorDict:
         """ _step을 호출 (torchrl EnvBase 호환용) """
         return self._step(tensordict)
@@ -534,7 +535,8 @@ class PocatEnv(EnvBase):
     # ---
     # 섹션 5: 액션 마스킹 (연산 집약적)
     # ---
-    
+
+    @torch.no_grad()
     def get_action_mask(self, td: TensorDict, debug: bool = False) -> Dict[str, torch.Tensor]:
         """
         현재 상태(td)에서 가능한 모든 액션을 계산하여
@@ -808,7 +810,8 @@ class PocatEnv(EnvBase):
                         candidate_mask[b_constr] &= ~same_parent_mask
                         
         return candidate_mask
-
+    
+    @torch.no_grad()
     def _get_thermal_current_mask(self,
                                   td: TensorDict,
                                   b_idx_node: torch.Tensor,
@@ -909,6 +912,7 @@ class PocatEnv(EnvBase):
     # 섹션 7: 계산 헬퍼 함수 (V6 로직 벡터화/적응)
     # ---
 
+    @torch.no_grad()
     def _calculate_tree_loads(self, 
                               nodes_tensor: torch.Tensor, 
                               adj_matrix: torch.Tensor,
@@ -1003,7 +1007,8 @@ class PocatEnv(EnvBase):
             power_loss[buck_mask] = conversion_loss + vin[buck_mask] * op_current[buck_mask]
             
         return power_loss
-
+    
+    @torch.no_grad()
     def _calculate_total_sleep_current(self, td: TensorDict) -> torch.Tensor:
         """ (V6 계승) 암전류(Sleep Current) 제약조건을 검사합니다. """
         
