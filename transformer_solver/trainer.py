@@ -465,20 +465,19 @@ class PocatTrainer:
             pbar=pbar,
             log_fn=self.log,
             log_idx=args.log_idx,
-            log_mode='detail'
+            log_mode='detail',
+            return_final_td=True,   # 👈 추가
         )
         pbar.close()
 
         # 4. 최고 성능 솔루션 선택
         reward = out['reward'] # (B_total,)
-        
         best_idx = reward.argmax()
         final_cost = -reward[best_idx].item()
         
-        # 5. 최종 상태(TensorDict) 추출
-        # (td는 env.step()에 의해 in-place로 수정되었으므로,
-        #  model()이 반환된 후의 td가 최종 상태입니다)
-        final_td_instance = td[best_idx].clone()
+        # 5. 모델이 돌리고 온 최종 TensorDict에서 해당 sample만 추출
+        final_td_all = out["final_td"]        # (B_total, N_max, ...)
+        final_td_instance = final_td_all[best_idx].clone()
 
         # 6. POMO 시작 노드 이름 찾기
         best_start_node_local_idx = best_idx % test_samples
@@ -526,13 +525,16 @@ class PocatTrainer:
         is_active = final_td["is_active_mask"].squeeze(0) # (N_max,)
 
 
-        node_types = self.env.node_type_tensor
+        # 🔍 최종 상태 기준으로 node_type 재계산 (env.node_type_tensor 쓰지 않음)
+        node_type_indices = all_nodes_features[
+            ..., FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]
+        ].argmax(dim=-1)  # (N_max,)
 
-        active_node_types = node_types[is_active]
+        active_types = node_type_indices[is_active]
 
-        num_batt = (active_node_types == NODE_TYPE_BATTERY).sum().item()
-        num_load = (active_node_types == NODE_TYPE_LOAD).sum().item()
-        num_ic   = (active_node_types == NODE_TYPE_IC).sum().item()
+        num_batt = (active_types == NODE_TYPE_BATTERY).sum().item()
+        num_load = (active_types == NODE_TYPE_LOAD).sum().item()
+        num_ic   = (active_types == NODE_TYPE_IC).sum().item()
 
         self.log(
             f"[Viz Debug] Active nodes -> Battery: {num_batt}, "

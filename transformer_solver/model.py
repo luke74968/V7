@@ -477,7 +477,9 @@ class PocatModel(nn.Module):
                 decode_type: str = 'greedy', 
                 pbar: object = None,
                 status_msg: str = "", 
-                log_fn=None, log_idx: int = 0, log_mode: str = 'progress'
+                log_fn=None, log_idx: int = 0, 
+                log_mode: str = 'progress',
+                return_final_td: bool = False,   # 👈 이 줄 추가
                 ) -> Dict[str, torch.Tensor]:
         
         base_desc = pbar.desc.split(' | ')[0] if pbar else ""
@@ -628,9 +630,15 @@ class PocatModel(nn.Module):
         # (B_total, T) -> (B_total)
         total_log_likelihood = torch.stack(log_probs, 1).sum(1)
 
-        return {
+        result = {
             "reward": total_reward,
             "log_likelihood": total_log_likelihood,
-            "actions": actions, # (디버깅용)
-            "value": first_value 
+            "actions": actions,  # (디버깅용)
+            "value": first_value,
         }
+
+        if return_final_td:
+            # 시각화/디버깅용이므로 그래디언트 연결은 끊고 복사
+            result["final_td"] = td.detach().clone()
+
+        return result
