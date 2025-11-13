@@ -465,7 +465,7 @@ class PocatTrainer:
             pbar=pbar,
             log_fn=self.log,
             log_idx=args.log_idx,
-            log_mode=args.log_mode
+            log_mode='detail'
         )
         pbar.close()
 
@@ -542,10 +542,16 @@ class PocatTrainer:
         battery_conf = self.env.generator.config.battery
         constraints = self.env.generator.config.constraints
 
+        # 💡 [추가] 노드 이름 생성 헬퍼 함수 (시각화 안정성 확보)
+        def get_graphviz_node_name(idx: int) -> str:
+            if idx < len(node_names):
+                return node_names[idx]
+            return f"Spawned_IC_{idx}"
+
         # 2. Graphviz 객체 생성
         dot = Digraph(comment=f"Power Tree - Cost ${final_cost:.4f}")
         dot.attr('node', shape='box', style='rounded,filled', fontname='Arial')
-        dot.attr(rankdir='LR', label=f"Transformer Solution (Start: {best_start_node_name})\nCost: ${final_cost:.4f}", labelloc='t')
+        dot.attr(rankdir='LR', label=f"Transformer Solution (Start: {best_start_node_name})\nCost: ${final_cost:.4f}", labelloc='t', fontname='Arial')
 
         # 3. 활성화된(Active) 노드만 순회
         active_indices = torch.where(is_active)[0]
@@ -562,6 +568,9 @@ class PocatTrainer:
             node_type = node_feat[FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax().item()
             #node_name = node_names[node_idx] if node_idx < len(node_names) else f"Spawned_IC_{node_idx}"
             node_name = get_graphviz_node_name(node_idx)
+            
+            
+            
             label = ""
             
             if node_type == NODE_TYPE_BATTERY:
@@ -600,8 +609,8 @@ class PocatTrainer:
         for p_idx, c_idx in zip(parent_indices, child_indices):
             # 두 노드 모두 활성화된 경우에만 엣지를 그림
             if is_active[p_idx] and is_active[c_idx]:
-                p_name = node_names[p_idx] if p_idx < len(node_names) else f"Spawned_IC_{p_idx}"
-                c_name = node_names[c_idx] if c_idx < len(node_names) else f"Spawned_IC_{c_idx}"
+                p_name = get_graphviz_node_name(p_idx)
+                c_name = get_graphviz_node_name(c_idx)
                 dot.edge(p_name, c_name)
         
         # 6. 파일 저장
