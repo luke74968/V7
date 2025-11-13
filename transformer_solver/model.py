@@ -575,6 +575,27 @@ class PocatModel(nn.Module):
                 "spawn_template": action_spawn.unsqueeze(-1),
             }
             
+            # [START]: 'detail' 모드 액션 로깅
+            if log_fn and log_mode == 'detail':
+                # (첫 번째 샘플(B_total=0) 기준으로 로그)
+                sample_idx = 0
+                if sample_idx < td.batch_size[0]:
+                    current_head = td["trajectory_head"][sample_idx].item()
+                    
+                    action_type_val = action_type[sample_idx].item()
+                    connect_target_val = action_connect[sample_idx].item()
+                    spawn_template_val = action_spawn[sample_idx].item()
+                    
+                    if action_type_val == 0:
+                        action_str = f"Connect (Type: 0, Head idx: {current_head} -> Target idx: {connect_target_val})"
+                    else: # action_type_val == 1 (Spawn)
+                        # 다음 슬롯 인덱스는 env.step() 직전에 사용되므로 여기서는 현재 값 로깅
+                        slot_idx = td['next_empty_slot_idx'][sample_idx].item()
+                        action_str = f"Spawn (Type: 1, Head idx: {current_head} | Template idx: {spawn_template_val} -> Slot idx: {slot_idx})"
+                        
+                    log_fn(f"  [Step {decoding_step:02d}] Action: {action_str}")
+            # [END]: 'detail' 모드 액션 로깅
+
             # 6. 환경 스텝 실행
             with torch.no_grad():
                 td.set("action", action_dict)

@@ -512,9 +512,32 @@ class PocatTrainer:
 
         # 1. 정보 추출
         node_names = self.env.generator.config.node_names # (N_max,)
-        all_nodes_features = final_td["nodes"] # (N_max, D)
-        adj_matrix = final_td["adj_matrix"] # (N_max, N_max)
-        is_active = final_td["is_active_mask"] # (N_max,)
+
+        # 💡 [START] 추가: 노드 이름 생성 헬퍼 함수
+        def get_graphviz_node_name(idx: int) -> str:
+            if idx < len(node_names):
+                return node_names[idx]
+            # Spawned IC는 고유 인덱스를 기반으로 이름 생성
+            return f"Spawned_IC_{idx}"
+        # 💡 [END] 추가: 노드 이름 생성 헬퍼 함수
+
+        all_nodes_features = final_td["nodes"].squeeze(0) # (N_max, D)
+        adj_matrix = final_td["adj_matrix"].squeeze(0) # (N_max, N_max)
+        is_active = final_td["is_active_mask"].squeeze(0) # (N_max,)
+
+
+        node_types = self.env.node_type_tensor
+
+        active_node_types = node_types[is_active]
+
+        num_batt = (active_node_types == NODE_TYPE_BATTERY).sum().item()
+        num_load = (active_node_types == NODE_TYPE_LOAD).sum().item()
+        num_ic   = (active_node_types == NODE_TYPE_IC).sum().item()
+
+        self.log(
+            f"[Viz Debug] Active nodes -> Battery: {num_batt}, "
+            f"Load: {num_load}, IC: {num_ic}"
+        )
         
         battery_conf = self.env.generator.config.battery
         constraints = self.env.generator.config.constraints
@@ -535,9 +558,10 @@ class PocatTrainer:
         for node_idx_tensor in active_indices:
             node_idx = node_idx_tensor.item()
             node_feat = all_nodes_features[node_idx]
-            node_type = self.env.node_type_tensor[node_idx]
-            node_name = node_names[node_idx] if node_idx < len(node_names) else f"Spawned_IC_{node_idx}"
             
+            node_type = node_feat[FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax().item()
+            #node_name = node_names[node_idx] if node_idx < len(node_names) else f"Spawned_IC_{node_idx}"
+            node_name = get_graphviz_node_name(node_idx)
             label = ""
             
             if node_type == NODE_TYPE_BATTERY:
