@@ -26,7 +26,7 @@ pip install -r requirements.lock.txt
 conda activate v7_env
 
 # python -m [모듈이름] [설정파일] [옵션]
-python3 -m or_tools_solver.main configs/config_6.json --max_sleep_current 0.001
+python3 -m or_tools_solver.main configs/config_IEIE.json --max_sleep_current 0.001
 
 
 ## 3. Transformer Solver (V7) 실행
@@ -50,11 +50,10 @@ python3 -m transformer_solver.run --config_file configs/config_6.json --config_y
 
 ### 추론 (Test)
 
-# 훈련된 모델(.pth)을 사용하여 config_4 문제 풀기
-python3 -m transformer_solver.run --test_only --config_file configs/config_4.json --config_yaml configs/config.yaml --log_mode detail --load_path "transformer_solver/result/YOUR_RUN_TIME/best_cost.pth"
+# 훈련된 모델(.pth)을 사용하여 config_IEIE 문제 풀기
+python3 -m transformer_solver.run --test_only --config_file configs/config_IEIE.json --config_yaml configs/config.yaml --log_mode detail --load_path "result_transformer/2025-1113-130542/epoch-25.pth
 
-# 동일한 모델로 N=218 config_6 문제 풀기
-python3 -m transformer_solver.run --test_only --config_file configs/config_6.json --config_yaml configs/config.yaml --log_mode detail --load_path "transformer_solver/result/YOUR_RUN_TIME/best_cost.pth"
+
 
 ### 디버그 (Debug)
 

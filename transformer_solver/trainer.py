@@ -452,8 +452,6 @@ class PocatTrainer:
         
         # 2. POMO 확장
         test_samples, start_nodes_idx = self.env.select_start_nodes(td)
-        if args.test_num_pomo_samples > test_samples:
-             self.log(f"Warning: test_num_pomo_samples({args.test_num_pomo_samples})가 Load 개수({test_samples})보다 큽니다.")
 
         pbar_desc = f"Solving (Mode: {args.decode_type}, Samples: {test_samples})"
         pbar = tqdm(total=1, desc=pbar_desc, dynamic_ncols=True)
@@ -466,7 +464,7 @@ class PocatTrainer:
             log_fn=self.log,
             log_idx=args.log_idx,
             log_mode='detail',
-            return_final_td=True,   # 👈 추가
+            return_final_td=True,
         )
         pbar.close()
 
@@ -486,7 +484,7 @@ class PocatTrainer:
         
         self.log(f"추론 완료 (Cost: ${final_cost:.4f}, Start: '{best_start_node_name}')")
 
-        # 7. 시각화 실행
+        # 7. 시각화 실행 (최종 TD와 계산된 값을 사용)
         self.visualize_result(
             final_td_instance, 
             final_cost, 
@@ -501,121 +499,277 @@ class PocatTrainer:
                          best_start_node_name: str, 
                          filename_prefix: str = "solution"):
         """
-        Lazy Spawn에 맞게 수정된 시각화 함수.
-        
-        최종 TensorDict 상태(final_td)의 'is_active_mask'와 'adj_matrix'를
-        읽어 활성화된 노드와 엣지만 그립니다.
+        최종 TensorDict 상태를 기반으로 파워트리 시각화(PNG)를 저장합니다.
+        (V6 OR-Tools 수준의 상세 정보를 포함하도록 수정됨)
         """
+        # --- (필요한 import는 파일 상단에 이미 있다고 가정) ---
+        from collections import defaultdict
+        from graphviz import Digraph
+        from common.data_classes import LDO, BuckConverter # V7 data_classes에서 IC 클래스 import
+        from .definitions import FEATURE_INDEX # FEATURE_INDEX import
+
         if self.result_dir is None: return
         os.makedirs(self.result_dir, exist_ok=True)
 
-        # 1. 정보 추출
-        node_names = self.env.generator.config.node_names # (N_max,)
-
-        # 💡 [START] 추가: 노드 이름 생성 헬퍼 함수
-        def get_graphviz_node_name(idx: int) -> str:
-            if idx < len(node_names):
-                return node_names[idx]
-            # Spawned IC는 고유 인덱스를 기반으로 이름 생성
-            return f"Spawned_IC_{idx}"
-        # 💡 [END] 추가: 노드 이름 생성 헬퍼 함수
-
-        all_nodes_features = final_td["nodes"].squeeze(0) # (N_max, D)
-        adj_matrix = final_td["adj_matrix"].squeeze(0) # (N_max, N_max)
-        is_active = final_td["is_active_mask"].squeeze(0) # (N_max,)
-
-
-        # 🔍 최종 상태 기준으로 node_type 재계산 (env.node_type_tensor 쓰지 않음)
-        node_type_indices = all_nodes_features[
-            ..., FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]
-        ].argmax(dim=-1)  # (N_max,)
-
-        active_types = node_type_indices[is_active]
-
-        num_batt = (active_types == NODE_TYPE_BATTERY).sum().item()
-        num_load = (active_types == NODE_TYPE_LOAD).sum().item()
-        num_ic   = (active_types == NODE_TYPE_IC).sum().item()
-
-        self.log(
-            f"[Viz Debug] Active nodes -> Battery: {num_batt}, "
-            f"Load: {num_load}, IC: {num_ic}"
-        )
-        
+        # 1. 정보 추출 및 맵 생성
+        node_names = self.env.generator.config.node_names
+        loads_map = {load['name']: load for load in self.env.generator.config.loads}
+        candidate_ics_map = {ic['name']: ic for ic in self.env.generator.config.available_ics}
         battery_conf = self.env.generator.config.battery
         constraints = self.env.generator.config.constraints
 
-        # 💡 [추가] 노드 이름 생성 헬퍼 함수 (시각화 안정성 확보)
-        def get_graphviz_node_name(idx: int) -> str:
-            if idx < len(node_names):
+        # --- Safe Name Lookup Helper ---
+        def get_node_name_safe(idx: int) -> str:
+            if 0 <= idx < len(node_names):
                 return node_names[idx]
             return f"Spawned_IC_{idx}"
+        # --- Safe Name Lookup Helper ---
 
-        # 2. Graphviz 객체 생성
-        dot = Digraph(comment=f"Power Tree - Cost ${final_cost:.4f}")
-        dot.attr('node', shape='box', style='rounded,filled', fontname='Arial')
-        dot.attr(rankdir='LR', label=f"Transformer Solution (Start: {best_start_node_name})\nCost: ${final_cost:.4f}", labelloc='t', fontname='Arial')
-
-        # 3. 활성화된(Active) 노드만 순회
-        active_indices = torch.where(is_active)[0]
+        # 2. 엣지 재구성 (adj_matrix를 사용)
+        adj_matrix = final_td["adj_matrix"].squeeze(0) # (N_max, N_max)
         
-        # (암전류/독립레일 계산을 위한 사전 작업)
-        active_adj_matrix = adj_matrix[is_active][:, is_active]
-        active_nodes_map = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(active_indices)}
+        used_ic_names = set()
+        child_to_parent = {}
+        parent_to_children = defaultdict(list)
         
-        # 4. 노드 추가 (Dot)
-        for node_idx_tensor in active_indices:
-            node_idx = node_idx_tensor.item()
-            node_feat = all_nodes_features[node_idx]
-            
-            node_type = node_feat[FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax().item()
-            #node_name = node_names[node_idx] if node_idx < len(node_names) else f"Spawned_IC_{node_idx}"
-            node_name = get_graphviz_node_name(node_idx)
-            
-            
-            
-            label = ""
-            
-            if node_type == NODE_TYPE_BATTERY:
-                # (암전류 계산은 복잡하므로 여기서는 생략, 총 전력만 표기)
-                label = f"🔋 {node_name}\n\nCost: ${final_cost:.2f}"
-                dot.node(node_name, label, shape='Mdiamond', color='darkgreen', fillcolor='white')
-            
-            elif node_type == NODE_TYPE_LOAD:
-                current_active_ma = node_feat[FEATURE_INDEX["current_active"]].item() * 1000
-                current_sleep_ua = node_feat[FEATURE_INDEX["current_sleep"]].item() * 1000000
-                label = f"💡 {node_name}\nActive: {current_active_ma:.1f}mA"
-                if current_sleep_ua > 0:
-                    label += f"\nSleep: {current_sleep_ua:,.1f}µA"
-                dot.node(node_name, label, color='dimgray', fillcolor='white')
-
-            elif node_type == NODE_TYPE_IC:
-                # (스폰된 IC)
-                i_out_ma = node_feat[FEATURE_INDEX["current_out"]].item() * 1000
-                tj = node_feat[FEATURE_INDEX["junction_temp"]].item()
-                tj_max = node_feat[FEATURE_INDEX["t_junction_max"]].item()
-                cost = node_feat[FEATURE_INDEX["cost"]].item()
-                
-                thermal_margin = tj_max - tj
-                node_color = 'blue'
-                if thermal_margin < 10: node_color = 'red'
-                elif thermal_margin < 25: node_color = 'orange'
-                
-                label = (f"📦 {node_name.split('@')[0]}\n\n"
-                         f"Iout: {i_out_ma:.1f}mA (Active)\n"
-                         f"Tj: {tj:.1f}°C (Max: {tj_max}°C)\n"
-                         f"Cost: ${cost:.2f}")
-                dot.node(node_name, label, color=node_color, fillcolor='lightgray', style='rounded,filled,dashed', penwidth='3')
-
-        # 5. 엣지 추가 (Dot)
         parent_indices, child_indices = adj_matrix.nonzero(as_tuple=True)
         for p_idx, c_idx in zip(parent_indices, child_indices):
-            # 두 노드 모두 활성화된 경우에만 엣지를 그림
-            if is_active[p_idx] and is_active[c_idx]:
-                p_name = get_graphviz_node_name(p_idx)
-                c_name = get_graphviz_node_name(c_idx)
+            p_name = get_node_name_safe(p_idx.item())
+            c_name = get_node_name_safe(c_idx.item())
+            
+            child_to_parent[c_name] = p_name
+            parent_to_children[p_name].append(c_name)
+            
+            if p_name in candidate_ics_map:
+                used_ic_names.add(p_name)
+        
+        # 3. Always-On, Independent Rail 경로 추적
+        always_on_nodes = {
+            name for name, conf in loads_map.items() if conf.get("always_on_in_sleep", False)
+        }
+        always_on_nodes.add(battery_conf['name'])
+        nodes_to_process = list(always_on_nodes)
+
+        while nodes_to_process:
+            node = nodes_to_process.pop(0)
+            if node in child_to_parent:
+                parent = child_to_parent[node]
+                if parent not in always_on_nodes:
+                    always_on_nodes.add(parent)
+                    nodes_to_process.append(parent)
+
+        supplier_nodes = set()
+        path_nodes = set()
+        for name, conf in loads_map.items():
+            rail_type = conf.get("independent_rail_type")
+            if rail_type == 'exclusive_supplier':
+                supplier_nodes.add(name)
+                if name in child_to_parent:
+                    supplier_nodes.add(child_to_parent.get(name))
+            elif rail_type == 'exclusive_path':
+                current_node = name
+                while current_node in child_to_parent:
+                    path_nodes.add(current_node)
+                    parent = child_to_parent[current_node]
+                    path_nodes.add(parent)
+                    if parent == battery_conf['name']: break
+                    current_node = parent
+
+        # 4. 액티브/슬립 전류 및 전력 계산 (Bottom-up 방식) 
+        junction_temps, actual_i_ins_active, actual_i_outs_active = {}, {}, {}
+        actual_i_ins_sleep, actual_i_outs_sleep, ic_self_consumption_sleep = {}, {}, {}
+        
+        active_current_draw = {name: conf["current_active"] for name, conf in loads_map.items()}
+        sleep_current_draw = {name: conf["current_sleep"] for name, conf in loads_map.items()}
+
+        all_nodes_features = final_td["nodes"].squeeze(0)
+        is_active = final_td["is_active_mask"].squeeze(0)
+        active_indices = torch.where(is_active)[0]
+        
+        active_ics_indices = [
+            idx.item() for idx in active_indices 
+            if get_node_name_safe(idx.item()).startswith(('Buck', 'LDO', 'Spawned_IC'))
+        ]
+        
+        processed_ics = set()
+        
+        while len(processed_ics) < len(active_ics_indices):
+            progress_made = False
+            
+            for ic_idx in active_ics_indices:
+                ic_name = get_node_name_safe(ic_idx)
+                if ic_name in processed_ics: continue
+
+                if ic_name.startswith("Spawned_IC"):
+                    node_feat = all_nodes_features[ic_idx]
+                    ic_type_idx = node_feat[FEATURE_INDEX["ic_type_idx"]].item()
+                    ic_type = 'LDO' if ic_type_idx == 1.0 else 'Buck'
+                    
+                    ic_data_for_obj = {
+                        'type': ic_type,
+                        'name': ic_name,
+                        'vin': node_feat[FEATURE_INDEX["vin_min"]].item(),
+                        'vout': node_feat[FEATURE_INDEX["vout_min"]].item(),
+                        # --- FIX: Missing required positional arguments ---
+                        'vin_min': node_feat[FEATURE_INDEX["vin_min"]].item(),
+                        'vin_max': node_feat[FEATURE_INDEX["vin_max"]].item(),
+                        'vout_min': node_feat[FEATURE_INDEX["vout_min"]].item(),
+                        'vout_max': node_feat[FEATURE_INDEX["vout_max"]].item(),
+                        # ------------------------------------------------
+                        'original_i_limit': node_feat[FEATURE_INDEX["i_limit"]].item() / (1.0 - constraints.get('current_margin', 0.1)),
+                        'i_limit': node_feat[FEATURE_INDEX["i_limit"]].item(),
+                        'operating_current': node_feat[FEATURE_INDEX["op_current"]].item(),
+                        'quiescent_current': node_feat[FEATURE_INDEX["quiescent_current"]].item(),
+                        'shutdown_current': node_feat[FEATURE_INDEX["shutdown_current"]].item(),
+                        'cost': node_feat[FEATURE_INDEX["cost"]].item(),
+                        'theta_ja': node_feat[FEATURE_INDEX["theta_ja"]].item(),
+                        't_junction_max': node_feat[FEATURE_INDEX["t_junction_max"]].item(),
+                    }
+                    if ic_type == 'LDO': ic_data_for_obj['v_dropout'] = 0.0
+                    
+                else: 
+                    ic_data_for_obj = candidate_ics_map[ic_name].copy()
+                    ic_type = ic_data_for_obj['type']
+                
+                ic_obj = LDO(**ic_data_for_obj) if ic_type == 'LDO' else BuckConverter(**ic_data_for_obj)
+                
+                children_names = parent_to_children.get(ic_name, [])
+
+                if all(c in loads_map or c in processed_ics for c in children_names):
+                    
+                    # --- Active 전류/발열 계산 ---
+                    total_i_out_active = sum(active_current_draw.get(c, 0) for c in children_names)
+                    actual_i_outs_active[ic_name] = total_i_out_active
+                    
+                    i_in_active = ic_obj.calculate_active_input_current(vin=ic_obj.vin, i_out=total_i_out_active)
+                    power_loss = ic_obj.calculate_power_loss(vin=ic_obj.vin, i_out=total_i_out_active)
+                    
+                    active_current_draw[ic_name] = i_in_active
+                    actual_i_ins_active[ic_name] = i_in_active
+                    ambient_temp = constraints.get('ambient_temperature', 25)
+                    junction_temps[ic_name] = ambient_temp + (power_loss * ic_obj.theta_ja)
+
+                    # --- Sleep 전류 계산 ---
+                    parent_name = child_to_parent.get(ic_name)
+                    is_ao = ic_name in always_on_nodes
+                    parent_is_ao = parent_name in always_on_nodes or parent_name == battery_conf['name']
+                    
+                    total_i_out_sleep = sum(sleep_current_draw.get(c, 0) for c in children_names)
+
+                    ic_self_sleep = ic_obj.get_self_sleep_consumption(is_ao, parent_is_ao)
+                    i_in_for_children = ic_obj.calculate_sleep_input_for_children(vin=ic_obj.vin, i_out_sleep=total_i_out_sleep)
+                    
+                    i_in_sleep = ic_self_sleep + i_in_for_children
+
+                    actual_i_ins_sleep[ic_name] = i_in_sleep
+                    actual_i_outs_sleep[ic_name] = total_i_out_sleep
+                    ic_self_consumption_sleep[ic_name] = ic_self_sleep
+                    sleep_current_draw[ic_name] = i_in_sleep
+
+                    processed_ics.add(ic_name)
+                    progress_made = True
+            
+            if not progress_made and len(active_ics_indices) > 0 and len(processed_ics) < len(active_ics_indices): 
+                self.log(f"⚠️ 경고: Power Tree 계산 순환 참조 발생 또는 미처리 IC 잔존.")
+                break
+
+        # 5. 최종 시스템 전체 값 계산
+        primary_nodes = parent_to_children.get(battery_conf['name'], [])
+        total_active_current = sum(active_current_draw.get(name, 0) for name in primary_nodes)
+        total_sleep_current = sum(sleep_current_draw.get(name, 0) for name in primary_nodes)
+        battery_avg_voltage = (battery_conf['voltage_min'] + battery_conf['voltage_max']) / 2
+        total_active_power = battery_avg_voltage * total_active_current
+
+        # 6. Graphviz 다이어그램 생성
+        dot = Digraph(comment=f"Power Tree - Cost ${final_cost:.4f}")
+        dot.attr('node', shape='box', style='rounded,filled', fontname='Arial')
+        
+        margin_info = f"Current Margin: {constraints.get('current_margin', 0)*100:.0f}%"
+        temp_info = f"Ambient Temp: {constraints.get('ambient_temperature', 25)}°C"
+        dot.attr(rankdir='LR', label=f"Transformer Solution (Start: {best_start_node_name})\n{margin_info}, {temp_info}\nCost: ${final_cost:.4f}", labelloc='t', fontname='Arial')
+
+        max_sleep_current_target = constraints.get('max_sleep_current', 0.0)
+        battery_label = (f"🔋 {battery_conf['name']}\n\n"
+            f"Total Active Power: {total_active_power:.2f} W\n"
+            f"Total Active Current: {total_active_current * 1000:.1f} mA\n"
+            f"Target Sleep Current: <= {max_sleep_current_target * 1000000:,.1f} µA\n"
+            f"Total Sleep Current: {total_sleep_current * 1000000:,.1f} µA")
+        dot.node(battery_conf['name'], battery_label, shape='box', color='darkgreen', fillcolor='white')
+
+        sequenced_loads = set()
+        if 'power_sequences' in constraints:
+            for seq in constraints['power_sequences']:
+                sequenced_loads.add(seq['j']); sequenced_loads.add(seq['k'])
+        
+        for ic_idx in active_ics_indices:
+            ic_name = get_node_name_safe(ic_idx)
+            
+            if ic_name.startswith("Spawned_IC"):
+                node_feat = all_nodes_features[ic_idx]
+                ic_data_for_label = {
+                    'name': ic_name,
+                    'vin': node_feat[FEATURE_INDEX["vin_min"]].item(),
+                    'vout': node_feat[FEATURE_INDEX["vout_min"]].item(),
+                    'operating_current': node_feat[FEATURE_INDEX["op_current"]].item(),
+                    't_junction_max': node_feat[FEATURE_INDEX["t_junction_max"]].item(),
+                    'cost': node_feat[FEATURE_INDEX["cost"]].item(),
+                }
+            else:
+                ic_data_for_label = candidate_ics_map[ic_name]
+            
+            
+            i_in_active_val = actual_i_ins_active.get(ic_name, 0)
+            i_out_active_val = actual_i_outs_active.get(ic_name, 0)
+            i_in_sleep_val = actual_i_ins_sleep.get(ic_name, 0)
+            i_out_sleep_val = actual_i_outs_sleep.get(ic_name, 0)
+            i_self_sleep_val = ic_self_consumption_sleep.get(ic_name, 0)
+            calculated_tj = junction_temps.get(ic_name, 0) 
+            
+            thermal_margin = ic_data_for_label['t_junction_max'] - calculated_tj
+            node_color = 'blue'
+            if thermal_margin < 10: node_color = 'red'
+            elif thermal_margin < 25: node_color = 'orange'
+            
+            node_style = 'rounded,filled'
+            if ic_name not in always_on_nodes:
+                node_style += ',dashed'
+
+            fill_color = 'white'
+            if ic_name in path_nodes:
+                fill_color = 'lightblue'
+            elif ic_name in supplier_nodes:
+                fill_color = 'lightyellow'
+            
+            label = (f"📦 {ic_name.split('@')[0]}\n\n"
+                     f"Vin: {ic_data_for_label['vin']:.2f}V, Vout: {ic_data_for_label['vout']:.2f}V\n"
+                     f"Iin: {i_in_active_val*1000:.1f}mA (Act) | {i_in_sleep_val*1000000:,.1f}µA (Slp)\n"
+                     f"Iout: {i_out_active_val*1000:.1f}mA (Act) | {i_out_sleep_val*1000000:,.1f}µA (Slp)\n"
+                     f"I_self: {ic_data_for_label['operating_current']*1000:.1f}mA (Act) | {i_self_sleep_val*1000000:,.1f}µA (Slp)\n"
+                     f"Tj: {calculated_tj:.1f}°C (Max: {ic_data_for_label['t_junction_max']}°C)\n"
+                     f"Cost: ${ic_data_for_label['cost']:.2f}")
+            dot.node(ic_name, label, color=node_color, fillcolor=fill_color, style=node_style, penwidth='3')
+
+        for name, conf in loads_map.items():
+            node_style = 'rounded,filled'
+            if name not in always_on_nodes: node_style += ',dashed'
+            fill_color = 'white'
+            if name in path_nodes: fill_color = 'lightblue'
+            elif name in supplier_nodes: fill_color = 'lightyellow'
+            
+            label = f"💡 {name}\nActive: {conf['voltage_typical']}V | {conf['current_active']*1000:.1f}mA\n"
+            if conf['current_sleep'] > 0: label += f"Sleep: {conf['current_sleep'] * 1000000:,.1f}µA\n"
+            conditions = []
+            if conf.get("independent_rail_type"): conditions.append(f"🔒 {conf['independent_rail_type']}")
+            if name in sequenced_loads: conditions.append("⛓️ Sequence")
+            if conditions: label += " ".join(conditions)
+            
+            penwidth = '3' if conf.get("always_on_in_sleep", False) else '1'
+            dot.node(name, label, color='dimgray', fillcolor=fill_color, style=node_style, penwidth=penwidth)
+
+        for p_name, children in parent_to_children.items():
+            for c_name in children:
                 dot.edge(p_name, c_name)
         
-        # 6. 파일 저장
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{filename_prefix}_cost_{final_cost:.4f}_{timestamp}"
         output_path = os.path.join(self.result_dir, filename)
