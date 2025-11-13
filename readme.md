@@ -38,7 +38,7 @@ watch -n 1 nvidia-smi
 ### 훈련 (Training)
 
 # 예시 1: config_6 문제로 훈련 (진행률 표시)
-python3 -m transformer_solver.run --config_file configs/config_6.json --config_yaml configs/config.yaml --batch_size 256 --log_mode progress
+python3 -m transformer_solver.run --config_file configs/config_IEIE.json --config_yaml configs/config.yaml --batch_size 1 --log_mode progress
 
 # 예시 2: config_4 문제로 훈련 (상세 로그)
 # V7은 N_MAX 아키텍처이므로 동일한 모델로 다른 크기의 문제를 훈련할 수 있습니다

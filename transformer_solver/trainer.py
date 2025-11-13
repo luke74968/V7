@@ -24,8 +24,7 @@ from .utils.common import TimeEstimator, clip_grad_norms, unbatchify, batchify
 # --- 시각화 모듈 임포트 ---
 from graphviz import Digraph
 from common.data_classes import LDO, BuckConverter # (common)
-from .definitions import FEATURE_INDEX, NODE_TYPE_LOAD, NODE_TYPE_IC
-
+from .definitions import FEATURE_INDEX, NODE_TYPE_LOAD, NODE_TYPE_IC, NODE_TYPE_BATTERY
 
 def update_progress(pbar, metrics, step):
     """ tqdm 진행률 표시줄을 업데이트합니다. """
@@ -374,14 +373,16 @@ class PocatTrainer:
         
         # POMO (Load 개수만큼) 확장
         eval_samples, start_nodes_idx = self.env.select_start_nodes(td_eval)
-        if eval_samples > 1:
-            td_eval = batchify(td_eval, eval_samples)
-            # (pom_start 로직은 env._reset에서 처리되었다고 가정)
+
 
         out = self.model(
-            td_eval, self.env, decode_type='greedy',
-            pbar=None, status_msg="Eval",
-            log_fn=self.log, log_idx=self.args.log_idx, log_mode='progress'
+            td_eval, self.env,
+            decode_type='greedy',
+            pbar=None,
+            status_msg="Eval",
+            log_fn=self.log,
+            log_idx=self.args.log_idx,
+            log_mode='progress'
         )
 
         # (B, N_pomo)
@@ -453,19 +454,17 @@ class PocatTrainer:
         test_samples, start_nodes_idx = self.env.select_start_nodes(td)
         if args.test_num_pomo_samples > test_samples:
              self.log(f"Warning: test_num_pomo_samples({args.test_num_pomo_samples})가 Load 개수({test_samples})보다 큽니다.")
-        
-        # (Load 개수만큼만 확장)
-        td = batchify(td, test_samples)
-        
-        # (POMO 시작 상태 적용 - solver_env가 _reset에서 처리)
-        
+
         pbar_desc = f"Solving (Mode: {args.decode_type}, Samples: {test_samples})"
         pbar = tqdm(total=1, desc=pbar_desc, dynamic_ncols=True)
         
         # 3. 모델 추론
         out = self.model(
-            td, self.env, decode_type=args.decode_type, pbar=pbar, 
-            log_fn=self.log, log_idx=args.log_idx,
+            td, self.env,
+            decode_type=args.decode_type,
+            pbar=pbar,
+            log_fn=self.log,
+            log_idx=args.log_idx,
             log_mode=args.log_mode
         )
         pbar.close()
