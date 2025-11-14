@@ -20,7 +20,7 @@ REWARD_WEIGHT_ACTION = 0.0  # (A2C) 액션(IC 스폰) 즉시 비용에 대한 �
 REWARD_WEIGHT_PATH = 1.0    # (A2C) 경로(Load->BATT) 완성 시 누적 비용 가중치
 STEP_PENALTY = 0.0          # (A2C) 스텝당 페널티
 FAILURE_PENALTY = -500.0    # (A2C) 실패(막다른 길) 페널티
-PENALTY_WEIGHT_SLEEP = 1000.0 # (A2C) 암전류 초과 페널티 가중치
+PENALTY_WEIGHT_SLEEP = 0.0 # (A2C) 암전류 초과 페널티 가중치
 
 
 class PocatEnv(EnvBase):
@@ -148,13 +148,13 @@ class PocatEnv(EnvBase):
         if self.arange_nodes is None or self.arange_nodes.numel() != num_nodes:
             self.arange_nodes = torch.arange(num_nodes, device=self.device)
         
-        if self.node_type_tensor is None:
-            # (N_max,)
-            node_types = td["nodes"][0, :, FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
-            self.node_type_tensor = node_types
+        #if self.node_type_tensor is None:
+        # (N_max,)
+        node_types = td["nodes"][0, :, FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
+        self.node_type_tensor = node_types
             
-            # (N_loads,)
-            self.load_idx_tensor = torch.where(node_types == NODE_TYPE_LOAD)[0]
+        # (N_loads,)
+        self.load_idx_tensor = torch.where(node_types == NODE_TYPE_LOAD)[0]
 
     def select_start_nodes(self, td: TensorDict) -> Tuple[int, torch.Tensor]:
         """ POMO (Multi-Start)를 위해 시작 가능한 모든 Load 노드의 인덱스를 반환합니다. """
@@ -386,7 +386,16 @@ class PocatEnv(EnvBase):
                 next_obs["nodes"][b_idx_spawn, slot_idx, FEATURE_INDEX["is_active"]] = 1.0
                 next_obs["nodes"][b_idx_spawn, slot_idx, FEATURE_INDEX["is_template"]] = 0.0
                 next_obs["nodes"][b_idx_spawn, slot_idx, FEATURE_INDEX["can_spawn_into"]] = 0.0
-                
+
+                # 🚨 수정 2: 노드 타입 One-Hot 필드를 IC 타입으로 확정합니다.
+                node_type_idx_start = FEATURE_INDEX["node_type"][0]
+                node_type_idx_end = FEATURE_INDEX["node_type"][1]
+
+                # 기존 원-핫 인코딩 필드를 0으로 초기화
+                next_obs["nodes"][b_idx_spawn, slot_idx, node_type_idx_start:node_type_idx_end] = 0.0
+                # IC 타입(3)을 1.0으로 설정
+                next_obs["nodes"][b_idx_spawn, slot_idx, node_type_idx_start + NODE_TYPE_IC] = 1.0
+
                 # 3. 환경 동적 마스크 업데이트
                 next_obs["is_active_mask"][b_idx_spawn, slot_idx] = True
                 next_obs["is_template_mask"][b_idx_spawn, slot_idx] = False
@@ -518,6 +527,7 @@ class PocatEnv(EnvBase):
             "next": next_obs,
             "reward": final_reward.unsqueeze(-1),
             "done": next_obs["done"],
+            "is_stuck": is_stuck.unsqueeze(-1),
         }, batch_size=batch_size)
         
     def get_reward(self,
@@ -908,7 +918,7 @@ class PocatEnv(EnvBase):
             t_max_raw   = sim_nodes[..., FEATURE_INDEX["t_junction_max"]]
             
             i_limit = i_limit_raw * (1.0 - margin_I)
-            t_max   = t_max_raw   # (V6는 T_max에 마진 적용 안 함, V7 common은 적용함. V6 계승)
+            t_max   = t_max_raw * (1.0 - margin_T)   # (V6는 T_max에 마진 적용 안 함, V7 common은 적용함. V6 계승)
             
             # (N_sim, N_max)
             current_check_ok = (final_i_out <= i_limit + 1e-6)

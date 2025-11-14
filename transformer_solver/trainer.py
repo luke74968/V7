@@ -279,6 +279,8 @@ class PocatTrainer:
                 reward = out["reward"].view(-1, num_starts)
                 log_likelihood = out["log_likelihood"].view(-1, num_starts)
                 value = out["value"].view(-1, num_starts)
+                is_stuck_pomo = out["is_stuck"].view(-1, num_starts) # (B_batch, N_starts)
+
 
                 # Critic Loss (V(s)가 실제 보상(G)을 예측하도록)
                 critic_loss = F.mse_loss(value, reward)
@@ -299,11 +301,16 @@ class PocatTrainer:
                 self.optimizer.step()
 
                 # (DDP) 모든 GPU의 통계를 집계
+                num_stuck_batch = is_stuck_pomo.sum() # 총 Stuck된 POMO 샘플 수 (B_batch * N_starts)
                 if self.is_ddp:
                     dist.all_reduce(loss, op=dist.ReduceOp.AVG)
                     dist.all_reduce(policy_loss, op=dist.ReduceOp.AVG)
                     dist.all_reduce(critic_loss, op=dist.ReduceOp.AVG)
                     # (min_cost는 all_reduce(op=dist.ReduceOp.MIN) 필요)
+                    dist.all_reduce(num_stuck_batch, op=dist.ReduceOp.SUM) # Stuck Count 합산
+                    num_stuck_batch = num_stuck_batch.item()
+                else:
+                    num_stuck_batch = num_stuck_batch.item()
                 
                 # (DDP) 0번 GPU에서만 로그 기록
                 if self.local_rank <= 0:
@@ -316,12 +323,16 @@ class PocatTrainer:
                     total_policy_loss += policy_loss.item()
                     total_critic_loss += critic_loss.item()
 
+                    self.stuck_count_total = getattr(self, 'stuck_count_total', 0)
+                    self.stuck_count_total += num_stuck_batch
+
                     update_progress(
                         train_pbar,
                         {
                             "Loss": loss.item(),
                             "Avg Cost": total_cost / step,
                             "Min Cost": min_epoch_cost,
+                            "Stuck/B": num_stuck_batch # 현재 배치에서 Stuck된 총 POMO 샘플 수
                         },
                         step
                     )
@@ -341,10 +352,11 @@ class PocatTrainer:
                     f"P_Loss {total_policy_loss / total_steps:.4f} | "
                     f"V_Loss {total_critic_loss / total_steps:.4f} | "
                     f"Min Cost ${min_epoch_cost:.2f}"
+                    f"Stuck Total: {self.stuck_count_total}" # 에폭 전체의 Stuck Count
                 )
                 tqdm.write(epoch_summary)
                 self.log(epoch_summary)
-                
+                del self.stuck_count_total
                 # --- 검증 (Evaluate) ---
                 val = self.evaluate(epoch)
                 self.log(f"[Eval] Epoch {epoch} | Avg BOM ${val['avg_bom']:.2f} | Min BOM ${val['min_bom']:.2f}")
