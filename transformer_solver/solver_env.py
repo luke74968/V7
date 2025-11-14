@@ -248,7 +248,7 @@ class PocatEnv(EnvBase):
         connect_target = action_dict["connect_target"].squeeze(-1)
         spawn_template = action_dict["spawn_template"].squeeze(-1)
         
-        current_head = td["trajectory_head"].detach().clone().squeeze(-1) # (B,)
+        current_head = td["trajectory_head"].squeeze(-1)  # (B,)
 
 
         # --- 0. 이미 'done'인 배치는 무시 ---
@@ -259,25 +259,50 @@ class PocatEnv(EnvBase):
                 "reward": torch.zeros(batch_size, 1, device=self.device), 
                 "done": td["done"]}, batch_size=td.batch_size)
 
-        # --- 1. 상태 텐서 복제 (수정 준비) ---
-        next_obs = td.clone()
-        # (In-place 수정이 발생하는 동적 텐서들은 모두 깊은 복사)
-        next_obs["nodes"] = td["nodes"].clone() # (가장 중요)
+        # --- 1. 상태 텐서 준비 (필요한 것만 선택 복사) ---
+        # 전체 td.clone() 제거 → 메모리 사용량 절감
+        next_obs = TensorDict({}, batch_size=td.batch_size, device=self.device)
+
+        # 1-1. 에피소드 동안 변하지 않는 정적 텐서들은 참조만 공유
+        #      (clone 불필요, 큰 행렬 재할당 방지)
+        if "scalar_prompt_features" in td.keys():
+            next_obs["scalar_prompt_features"] = td["scalar_prompt_features"]
+        if "matrix_prompt_features" in td.keys():
+            next_obs["matrix_prompt_features"] = td["matrix_prompt_features"]
+        if "attention_mask" in td.keys():
+            next_obs["attention_mask"] = td["attention_mask"]
+
+        # ⚠ connectivity_matrix는 Spawn 시 in-place로 갱신되므로 현재 구조에서는
+        #   동적 텐서 취급이 필요하다. (정적으로 만들려면 추가 리팩터링 필요)
+
+        # 1-2. 실제로 스텝마다 변하는 동적 텐서들만 clone()
+        next_obs["nodes"] = td["nodes"].clone()  # (가장 중요)
         next_obs["adj_matrix"] = td["adj_matrix"].clone()
         next_obs["adj_matrix_T"] = td["adj_matrix_T"].clone()
-        next_obs["connectivity_matrix"] = td["connectivity_matrix"].clone()
+        if "connectivity_matrix" in td.keys():
+            next_obs["connectivity_matrix"] = td["connectivity_matrix"].clone()
+
+        next_obs["unconnected_loads_mask"] = td["unconnected_loads_mask"].clone()
         next_obs["is_active_mask"] = td["is_active_mask"].clone()
         next_obs["is_template_mask"] = td["is_template_mask"].clone()
         next_obs["can_spawn_into_mask"] = td["can_spawn_into_mask"].clone()
-        next_obs["current_target_load"] = td["current_target_load"].clone()
-        next_obs["is_exclusive_mask"] = td["is_exclusive_mask"].clone()
-        next_obs["staging_cost"] = td["staging_cost"].clone()
-        next_obs["step_count"] = td["step_count"].clone()
-        next_obs["is_used_ic_mask"] = td["is_used_ic_mask"].clone()
-        next_obs["trajectory_head"] = td["trajectory_head"].detach().clone()
-        next_obs["unconnected_loads_mask"] = td["unconnected_loads_mask"].clone()
-        next_obs["current_cost"] = td["current_cost"].clone()
         next_obs["next_empty_slot_idx"] = td["next_empty_slot_idx"].clone()
+
+        next_obs["trajectory_head"] = td["trajectory_head"].clone()
+
+        next_obs["step_count"] = td["step_count"].clone()
+        next_obs["current_cost"] = td["current_cost"].clone()
+        next_obs["staging_cost"] = td["staging_cost"].clone()
+        next_obs["is_used_ic_mask"] = td["is_used_ic_mask"].clone()
+        next_obs["current_target_load"] = td["current_target_load"].clone()
+        if "is_exclusive_mask" in td.keys():
+            next_obs["is_exclusive_mask"] = td["is_exclusive_mask"].clone()
+
+        # done은 아래에서 새로 계산하지만, '이미 done인 배치 롤백'에서 사용되므로 먼저 복사
+        if "done" in td.keys():
+            next_obs["done"] = td["done"].clone()
+        else:
+            next_obs["done"] = torch.zeros_like(td["step_count"], dtype=torch.bool)
 
         step_reward = torch.full((batch_size,), STEP_PENALTY, dtype=torch.float32, device=self.device)
         batch_indices = torch.arange(batch_size, device=self.device)
@@ -552,7 +577,7 @@ class PocatEnv(EnvBase):
         self._ensure_buffers(td) # 버퍼 최신화
 
         batch_size, num_nodes = td.batch_size[0], self.N_max
-        current_head = td["trajectory_head"].detach().clone().squeeze(-1) # (B,)
+        current_head = td["trajectory_head"].squeeze(-1)  # (B,)
 
         # --- 1. 기본 상태 마스크 (저비용) ---
         is_active = td["is_active_mask"] # (B, N_max) - 현재 활성 노드

@@ -114,11 +114,20 @@ class PocatTrainer:
 
         # --- 4. 검증(Evaluate)용 데이터셋 ---
         self.eval_batch_size = getattr(args, "eval_batch_size", 128)
-        if self.local_rank <= 0: # 0번 GPU에서만 생성
+        # ⚠️ 대용량 정적 텐서(노드/행렬)는 GPU에 계속 올려두면
+        #    한 번만 쓰더라도 VRAM을 크게 점유하므로,
+        #    평가용 텐서는 CPU 메모리에만 보관합니다.
+        if self.local_rank <= 0:  # 0번 GPU에서만 생성
             with torch.no_grad():
-                self._eval_td_fixed = self.env.generator(
-                    batch_size=self.eval_batch_size
-                ).to(self.device)
+                # generator가 반환하는 TensorDict를 CPU로 강제 이동
+                self._eval_td_fixed = (
+                    self.env.generator(batch_size=self.eval_batch_size)
+                    .to("cpu")
+                )
+        else:
+            # DDP에서 rank>0은 eval을 직접 돌리지 않으므로 None으로 둬도 됨
+            self._eval_td_fixed = None
+
         self.best_eval_bom = float("inf")
 
     def pretrain_critic(self, expert_data_path: str, pretrain_epochs: int = 5):
@@ -320,6 +329,10 @@ class PocatTrainer:
             if train_pbar:
                 train_pbar.close()
 
+            # 에폭이 끝날 때 한 번 더 캐시 정리
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             # (DDP) 0번 GPU에서만 에폭 요약, 검증, 저장
             if self.local_rank <= 0:
                 epoch_summary = (
@@ -369,7 +382,10 @@ class PocatTrainer:
         self.model.eval()
         
         # (고정된 검증 데이터셋 사용)
-        td_eval = self.env._reset(self._eval_td_fixed.clone())
+        #  - _eval_td_fixed 는 CPU에 보관하고,
+        #    실제 평가 시에만 현재 device(GPU)로 복사해서 사용
+        td_seed = self._eval_td_fixed.clone().to(self.device)
+        td_eval = self.env._reset(td_seed)
         
         # POMO (Load 개수만큼) 확장
         eval_samples, start_nodes_idx = self.env.select_start_nodes(td_eval)
@@ -491,6 +507,22 @@ class PocatTrainer:
             best_start_node_name, 
             filename_prefix
         )
+
+        # ── 메모리 정리 ────────────────────────────────────────────────
+        # out 안에는 reward, log_likelihood 등 GPU 텐서가 포함되어 있다.
+        # 함수가 끝나면 어차피 파이썬 참조는 사라지지만,
+        # CUDA 캐시를 조금이라도 되돌리고 싶다면 여기서 정리해 줄 수 있다.
+        try:
+            del out
+            del final_td_all
+            del final_td_instance
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except NameError:
+            # 혹시라도 위 변수 이름이 바뀌어도 크래시는 방지
+            pass
+
+
         self.log(f"{log_prefix} 시각화 다이어그램 저장 완료.")
 
     def visualize_result(self, 

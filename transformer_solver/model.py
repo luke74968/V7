@@ -274,10 +274,10 @@ class PocatEncoder(nn.Module):
         spawn_ids = node_features[..., FEATURE_INDEX["can_spawn_into"]].long()
         rail_ids = node_features[..., FEATURE_INDEX["independent_rail_type"]].round().long().clamp(0, 2)
         
-        node_embeddings += self.embedding_is_active(active_ids)
-        node_embeddings += self.embedding_is_template(template_ids)
-        node_embeddings += self.embedding_can_spawn_into(spawn_ids)
-        node_embeddings += self.embedding_rail_type(rail_ids)
+        node_embeddings.add_(self.embedding_is_active(active_ids))
+        node_embeddings.add_(self.embedding_is_template(template_ids))
+        node_embeddings.add_(self.embedding_can_spawn_into(spawn_ids))
+        node_embeddings.add_(self.embedding_rail_type(rail_ids))
         
         # --- 3. 듀얼 어텐션 (CaDA) 실행 ---
         connectivity_mask = td['connectivity_matrix'] # (B, N_MAX, N_MAX)
@@ -517,7 +517,7 @@ class PocatModel(nn.Module):
         
         # (B) -> (B * num_starts)
         td_expanded_view = batchify(td, num_starts)
-        td = td_expanded_view.clone()
+        td = td_expanded_view
         cache = cache.batchify(num_starts) # 캐시도 확장
 
         # POMO 시작: 첫 액션(Load 선택)을 환경에 강제 적용
@@ -638,7 +638,25 @@ class PocatModel(nn.Module):
         }
 
         if return_final_td:
-            # 시각화/디버깅용이므로 그래디언트 연결은 끊고 복사
-            result["final_td"] = td.detach().clone()
+            # 시각화/디버깅용 최종 상태는 GPU 전체 TensorDict를 통째로
+            # clone() 하는 대신,
+            #  - 그래디언트 연결을 끊고(detach)
+            #  - 필요한 키만 골라서
+            #  - CPU 메모리로만 저장한다.
+            #
+            # visualize_result()에서 사용하는 키:
+            #   - "nodes"
+            #   - "adj_matrix"
+            #   - "is_active_mask"
+            final_td_cpu = TensorDict(
+                {
+                    "nodes": td["nodes"].detach().cpu(),
+                    "adj_matrix": td["adj_matrix"].detach().cpu(),
+                    "is_active_mask": td["is_active_mask"].detach().cpu(),
+                },
+                batch_size=td.batch_size,
+            )
+            result["final_td"] = final_td_cpu
+
 
         return result
