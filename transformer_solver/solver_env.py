@@ -20,7 +20,7 @@ REWARD_WEIGHT_ACTION = 0.0  # (A2C) 액션(IC 스폰) 즉시 비용에 대한 �
 REWARD_WEIGHT_PATH = 1.0    # (A2C) 경로(Load->BATT) 완성 시 누적 비용 가중치
 STEP_PENALTY = 0.0          # (A2C) 스텝당 페널티
 FAILURE_PENALTY = -500.0    # (A2C) 실패(막다른 길) 페널티
-PENALTY_WEIGHT_SLEEP = 0.0 # (A2C) 암전류 초과 페널티 가중치
+PENALTY_WEIGHT_SLEEP = 500.0 # (A2C) 암전류 초과 페널티 가중치
 
 
 class PocatEnv(EnvBase):
@@ -148,13 +148,13 @@ class PocatEnv(EnvBase):
         if self.arange_nodes is None or self.arange_nodes.numel() != num_nodes:
             self.arange_nodes = torch.arange(num_nodes, device=self.device)
         
-        #if self.node_type_tensor is None:
-        # (N_max,)
-        node_types = td["nodes"][0, :, FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
-        self.node_type_tensor = node_types
+        if self.node_type_tensor is None:
+            # (N_max,)
+            node_types = td["nodes"][0, :, FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
+            self.node_type_tensor = node_types
             
-        # (N_loads,)
-        self.load_idx_tensor = torch.where(node_types == NODE_TYPE_LOAD)[0]
+            # (N_loads,)
+            self.load_idx_tensor = torch.where(node_types == NODE_TYPE_LOAD)[0]
 
     def select_start_nodes(self, td: TensorDict) -> Tuple[int, torch.Tensor]:
         """ POMO (Multi-Start)를 위해 시작 가능한 모든 Load 노드의 인덱스를 반환합니다. """
@@ -527,7 +527,6 @@ class PocatEnv(EnvBase):
             "next": next_obs,
             "reward": final_reward.unsqueeze(-1),
             "done": next_obs["done"],
-            "is_stuck": is_stuck.unsqueeze(-1),
         }, batch_size=batch_size)
         
     def get_reward(self,
@@ -757,7 +756,8 @@ class PocatEnv(EnvBase):
         
         # 1. Head(Child)의 상태adj_matrix_T
         head_status = is_exclusive_mask_batch[torch.arange(B_act), child_nodes] # (B_act,)
-        head_is_load = (self.node_type_tensor[child_nodes] == NODE_TYPE_LOAD) # (B_act,)
+        node_type_indices_full = td["nodes"][b_idx_node, child_nodes, FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
+        head_is_load = (node_type_indices_full == NODE_TYPE_LOAD) # (B_act,)
 
         # 2. Parent(후보)의 상태
         parent_status = is_exclusive_mask_batch # (B_act, N_nodes)
@@ -918,7 +918,7 @@ class PocatEnv(EnvBase):
             t_max_raw   = sim_nodes[..., FEATURE_INDEX["t_junction_max"]]
             
             i_limit = i_limit_raw * (1.0 - margin_I)
-            t_max   = t_max_raw * (1.0 - margin_T)   # (V6는 T_max에 마진 적용 안 함, V7 common은 적용함. V6 계승)
+            t_max   = t_max_raw * (1.0 - margin_T)  
             
             # (N_sim, N_max)
             current_check_ok = (final_i_out <= i_limit + 1e-6)
@@ -928,8 +928,9 @@ class PocatEnv(EnvBase):
             all_checks_ok = current_check_ok & temp_check_ok
             
             # (N_sim, N_max) - IC가 아닌 노드는 항상 OK
-            ic_mask_sim = ic_mask_1d.expand(N_sim, -1)
-            
+            ic_type_indices = sim_nodes[..., FEATURE_INDEX["node_type"][0]:FEATURE_INDEX["node_type"][1]].argmax(-1)
+            ic_mask_sim = (ic_type_indices == NODE_TYPE_IC)   
+
             # (N_sim,) - (모든 IC가 OK)
             is_valid_simulation = (all_checks_ok | ~ic_mask_sim).all(dim=-1)
 

@@ -340,12 +340,9 @@ class PocatDecoder(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim // 2),
             nn.ReLU(),
-            nn.Linear(embedding_dim // 2, 1), # (B, 1, 1) -> (B, 1)
-            nn.Tanh()
+            nn.Linear(embedding_dim // 2, 1) # (B, 1, 1) -> (B, 1)
         )
         
-        self.value_scale = 100.0
-
         # 3b. Action Type Head (0: Connect, 1: Spawn)
         self.type_head = nn.Linear(embedding_dim, 2)
         
@@ -393,7 +390,7 @@ class PocatDecoder(nn.Module):
         # --- 2. 4개의 헤드로 q_vec 분배 ---
         
         # 2a. Critic Value (B, 1)
-        value = self.value_head(q_vec).squeeze(-1) * self.value_scale
+        value = self.value_head(q_vec).squeeze(-1)
         
         # 2b. Action Type Logits (B, 2)
         logits_action_type = self.type_head(q_vec).squeeze(1)
@@ -607,7 +604,6 @@ class PocatModel(nn.Module):
                 output_td = env.step(td)
             
             reward = output_td["reward"]
-            last_is_stuck = output_td.get("is_stuck", torch.zeros_like(reward, dtype=torch.bool))
             td = output_td["next"]
             
             # 7. A2C 학습을 위한 데이터 수집
@@ -639,7 +635,6 @@ class PocatModel(nn.Module):
             "log_likelihood": total_log_likelihood,
             "actions": actions,  # (디버깅용)
             "value": first_value,
-            "is_stuck": last_is_stuck.squeeze(-1)
         }
 
         if return_final_td:
