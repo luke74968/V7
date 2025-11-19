@@ -1,5 +1,11 @@
-# V7/or_tools_solver/core.py
-
+# Copyright (c) 2025 Minuk Lee. All rights reserved.
+# 
+# This source code is proprietary and confidential.
+# Unauthorized copying of this file, via any medium is strictly prohibited.
+# 
+# For licensing terms, see the LICENSE file.
+# Contact: minuklee@snu.ac.kr
+# 
 """
 OR-Tools CP-SAT 모델 정의 (or_tools_solver/core.py)
 
@@ -55,7 +61,7 @@ class SolutionLogger(cp_model.CpSolverSolutionCallback):
             self.StopSearch()
             return
         self.__solution_count += 1
-        print(f"  -> V7: 대표 솔루션 #{self.__solution_count} 발견!")
+        print(f"  -> 대표 솔루션 #{self.__solution_count} 발견!")
         current_solution = {
             "score": self.ObjectiveValue(),
             "used_ic_names": {name for name, var in self.__ic_is_used.items() if self.Value(var)},
@@ -272,10 +278,7 @@ def add_always_on_constraints(model, all_nodes, loads, candidate_ics, battery, e
 
 def add_sleep_current_constraints(model, battery, candidate_ics, loads, constraints, edges, is_always_on_path):
     """암전류(Sleep Current) 제약 조건을 추가합니다."""
-    # V7 `data_classes`의 캡슐화 로직은 CP-SAT 모델 변수와
-    # 직접 상호작용할 수 없으므로, V6처럼 CP-SAT 모델 내부에
-    # 3-state 로직과 Buck 효율 로직을 다시 구현해야 합니다.
-    
+   
     max_sleep = constraints.get('max_sleep_current', 0.0)
     if max_sleep <= 0:
         return # 암전류 제약 없음
@@ -360,7 +363,7 @@ def add_sleep_current_constraints(model, battery, candidate_ics, loads, constrai
         child_terms = []
         ub_sum = 0
         for c in children:
-            # V6 로직: 엣지가 활성화된 자식의 sleep_in을 더함
+            # 엣지가 활성화된 자식의 sleep_in을 더함
             edge_ic_c = edges[(ic.name, c.name)]
             use_c_sleep = bool_and(edge_ic_c, is_always_on_path[c.name], f"sleep_edge_{ic.name}__{c.name}")
             ub_c = node_sleep_ub[c.name]
@@ -390,7 +393,7 @@ def add_sleep_current_constraints(model, battery, candidate_ics, loads, constrai
         # (E) IC의 총 입력 전류 = 자체 소모 + 자식 공급용
         model.Add(node_sleep_in[ic.name] == ic_self + in_for_children)
 
-    # --- 최종 제약 조건: 배터리 관점 (V6와 동일) ---
+    # --- 최종 제약 조건: 배터리 관점 ---
     top_children = [c for c in all_ic_and_load_nodes if (battery.name, c.name) in edges]
     final_terms = []
     for c in top_children:
@@ -406,7 +409,7 @@ def create_solver_model(candidate_ics, loads, battery, constraints, ic_groups):
     """
     OR-Tools 모델을 생성하고 모든 제약 조건을 추가한 뒤 반환합니다.
     """
-    print("\n🧠 V7: OR-Tools 모델 생성 시작...")
+    print("\n🧠 OR-Tools 모델 생성 시작...")
     model = cp_model.CpModel()
 
     # 1. 변수 초기화
@@ -414,7 +417,7 @@ def create_solver_model(candidate_ics, loads, battery, constraints, ic_groups):
         model, candidate_ics, loads, battery
     )
     
-    # 2. 제약 조건 추가 (V6와 동일한 순서)
+    # 2. 제약 조건 추가
     add_base_topology_constraints(model, candidate_ics, loads, battery, edges, ic_is_used)
     add_ic_group_constraints(model, ic_groups, ic_is_used)
     add_current_limit_constraints(model, candidate_ics, loads, constraints, edges)
@@ -431,7 +434,7 @@ def create_solver_model(candidate_ics, loads, battery, constraints, ic_groups):
     return model, edges, ic_is_used
 
 # ---
-# 4. 병렬해 탐색 함수 (V6와 동일)
+# 4. 병렬해 탐색 함수
 # ---
 def find_all_load_distributions(base_solution, candidate_ics, loads, battery, constraints, viz_func, check_func):
     """
@@ -454,7 +457,7 @@ def find_all_load_distributions(base_solution, candidate_ics, loads, battery, co
     for p, c in base_solution['active_edges']:
         parent_to_children[p].append(c)
 
-    # Exclusive 제약에 걸린 노드 식별 (V6 로직)
+    # Exclusive 제약에 걸린 노드 식별
     exclusive_ics = set()
     exclusive_loads = set()
     for load in loads:

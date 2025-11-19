@@ -4,7 +4,7 @@
 
 # 서버관련 셋업
 
-# 가상환경 생성 (v6_env 라는 이름으로, Python 3.10 버전을 사용)
+# 가상환경 생성 (v7_env 라는 이름으로, Python 3.10 버전을 사용)
 conda create -n v7_env python=3.12 -y
 
 # 가상환경 활성화 
@@ -60,3 +60,15 @@ python3 -m transformer_solver.run --test_only --config_file configs/config_IEIE.
 # config_6 문제로 대화형 디버거 실행
 # (config.yaml의 N_MAX=500과 동일한 값을 --n_max로 전달)
 python3 -m transformer_solver.debug_env configs/config_6.json --n_max 500
+
+
+
+
+
+
+
+## License
+
+Copyright (c) 2025 Minuk Lee. All Rights Reserved.
+Unauthorized copying of this file, via any medium is strictly prohibited.
+For usage permissions, please contact: minuklee@snu.ac.kr

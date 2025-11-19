@@ -1,5 +1,11 @@
-# transformer_solver/run.py
-
+# Copyright (c) 2025 Minuk Lee. All rights reserved.
+# 
+# This source code is proprietary and confidential.
+# Unauthorized copying of this file, via any medium is strictly prohibited.
+# 
+# For licensing terms, see the LICENSE file.
+# Contact: minuklee@snu.ac.kr
+# 
 import os
 import sys
 import time
@@ -15,7 +21,7 @@ import torch.distributed as dist
 if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8:
     torch.set_float32_matmul_precision('high')
 
-# --- V7 핵심 모듈 임포트 ---
+# --- 핵심 모듈 임포트 ---
 # (이 파일들은 우리가 방금/앞으로 만들 파일들입니다)
 from .model import PocatModel
 from .solver_env import PocatEnv
@@ -73,7 +79,7 @@ def main(args):
         args.log("❌ CRITICAL: 'model_params: N_MAX:'를 config.yaml에서 찾을 수 없거나 유효하지 않습니다.")
         return
 
-    # --- 2. V7 PocatEnv (환경) 생성 ---
+    # --- 2. PocatEnv (환경) 생성 ---
     # (N_max 값을 Generator와 Env 양쪽에 주입)
     env = PocatEnv(
         generator_params={
@@ -83,12 +89,10 @@ def main(args):
         N_max=n_max # Env가 Spec을 생성할 때 사용
     )
 
-    # --- 3. V7 PocatModel (모델) 생성 준비 ---
-    # (V6의 `num_nodes` 동적 주입 로직을 제거하고,
-    #  `config.yaml`의 `N_MAX` 값을 그대로 사용합니다.)
+    # --- 3. PocatModel (모델) 생성 준비 ---
     # (args.model_params['N_MAX'] = n_max 는 이미 __main__에서 로드됨)
     
-    # --- 4. V7 PocatTrainer (트레이너) 생성 ---
+    # --- 4. PocatTrainer (트레이너) 생성 ---
     trainer = PocatTrainer(args, env, device)
 
     # --- 5. Critic 사전훈련 (A2C 안정화) ---

@@ -1,5 +1,11 @@
-# transformer_solver/solver_env.py
-
+# Copyright (c) 2025 Minuk Lee. All rights reserved.
+# 
+# This source code is proprietary and confidential.
+# Unauthorized copying of this file, via any medium is strictly prohibited.
+# 
+# For licensing terms, see the LICENSE file.
+# Contact: minuklee@snu.ac.kr
+# 
 import torch
 from tensordict import TensorDict
 from torchrl.envs import EnvBase
@@ -734,11 +740,11 @@ class PocatEnv(EnvBase):
             }
 
     # ---
-    # 섹션 6: 마스킹 헬퍼 함수 (V6 로직 벡터화/적응)
+    # 섹션 6: 마스킹 헬퍼 함수 
     # ---
 
     def _trace_path_batch(self, start_nodes: torch.Tensor, adj_matrix_T: torch.Tensor) -> torch.Tensor:
-        """ (V6 계승) start_nodes의 모든 조상(ancestors)을 찾아 마스크로 반환 (사이클 방지용) """
+        """ start_nodes의 모든 조상(ancestors)을 찾아 마스크로 반환 (사이클 방지용) """
         batch_size, num_nodes, _ = adj_matrix_T.shape
         path_mask = torch.zeros(batch_size, num_nodes, dtype=torch.bool, device=self.device)
 
@@ -760,7 +766,7 @@ class PocatEnv(EnvBase):
                             b_idx_node: torch.Tensor, # 💡 'b_idx_node' 인자 추가
                             child_nodes: torch.Tensor
                             ) -> torch.Tensor:
-        """ (V6 계승) 독립 레일(Exclusive Rail) 제약조건 마스크 생성 """
+        """ 독립 레일(Exclusive Rail) 제약조건 마스크 생성 """
         # (td와 b_idx_node에서 필요한 텐서를 가져옴)
         is_exclusive_mask_batch = td["is_exclusive_mask"][b_idx_node]
         adj_matrix_batch = td["adj_matrix"][b_idx_node]
@@ -821,7 +827,7 @@ class PocatEnv(EnvBase):
                 if parent_of_j_exists.any():
                     b_constr = b_idx_check[parent_of_j_exists] # (B_constr,)
                     
-                    # 'j'의 부모 인덱스 (V6는 argmax, V7은 Full AdjT)
+                    # 'j'의 부모 인덱스 
                     parent_of_j_idx = adj_matrix_batch[b_constr, :, j_idx].long().argmax(-1) # (B_constr,)
                     
                     # 'j'의 부모(parent_of_j)의 모든 조상(ancestors)을 찾음
@@ -836,7 +842,7 @@ class PocatEnv(EnvBase):
                         same_parent_mask = (self.arange_nodes == parent_of_j_idx.unsqueeze(1))
                         candidate_mask[b_constr] &= ~same_parent_mask
 
-            # Case 2: (V6와 동일) 현재 child가 'j' (k의 부모를 찾는 중)
+            # Case 2: 현재 child가 'j' (k의 부모를 찾는 중)
             is_j_mask = (child_nodes == j_idx)
             if is_j_mask.any():
                 b_idx_check = torch.where(is_j_mask)[0]
@@ -865,7 +871,7 @@ class PocatEnv(EnvBase):
                                   child_nodes: torch.Tensor,
                                   base_valid_parents: torch.Tensor) -> torch.Tensor:
         """
-        (V6 계승) 전류/발열 한계를 만족하는지 시뮬레이션하여 마스크 생성.
+        전류/발열 한계를 만족하는지 시뮬레이션하여 마스크 생성.
         (연산 비용이 가장 높은 함수)
         """
         
@@ -957,7 +963,7 @@ class PocatEnv(EnvBase):
         return thermal_current_ok
 
     # ---
-    # 섹션 7: 계산 헬퍼 함수 (V6 로직 벡터화/적응)
+    # 섹션 7: 계산 헬퍼 함수 
     # ---
 
     @torch.no_grad()
@@ -966,7 +972,7 @@ class PocatEnv(EnvBase):
                               adj_matrix: torch.Tensor,
                               adj_matrix_T: torch.Tensor
                               ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """ (V6 계승) Adjacency Matrix를 기반으로 트리 전체의 전류/전력손실/온도를 계산합니다. """
+        """ Adjacency Matrix를 기반으로 트리 전체의 전류/전력손실/온도를 계산합니다. """
         
         batch_size, num_nodes, _ = nodes_tensor.shape
         
@@ -1035,7 +1041,7 @@ class PocatEnv(EnvBase):
                               ldo_mask: torch.Tensor,
                               buck_mask: torch.Tensor
                               ) -> torch.Tensor:
-        """ (V6 계승) I_out을 기반으로 IC의 전력 손실(P_loss)을 계산합니다. """
+        """ I_out을 기반으로 IC의 전력 손실(P_loss)을 계산합니다. """
         
         vin = ic_node_features[..., FEATURE_INDEX["vin_min"]]
         vout = ic_node_features[..., FEATURE_INDEX["vout_min"]]
@@ -1058,7 +1064,7 @@ class PocatEnv(EnvBase):
     
     @torch.no_grad()
     def _calculate_total_sleep_current(self, td: TensorDict) -> torch.Tensor:
-        """ (V6 계승) 암전류(Sleep Current) 제약조건을 검사합니다. """
+        """ 암전류(Sleep Current) 제약조건을 검사합니다. """
         
         batch_size, num_nodes, _ = td["nodes"].shape
         adj_matrix = td["adj_matrix"].float()

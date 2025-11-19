@@ -1,5 +1,11 @@
-# common/config_loader.py
-
+# Copyright (c) 2025 Minuk Lee. All rights reserved.
+# 
+# This source code is proprietary and confidential.
+# Unauthorized copying of this file, via any medium is strictly prohibited.
+# 
+# For licensing terms, see the LICENSE file.
+# Contact: minuklee@snu.ac.kr
+# 
 """
 JSON 설정 파일 로더 (common/config_loader.py)
 
@@ -65,7 +71,6 @@ def load_configuration_from_json(config_string: str) -> Tuple[Battery, List[Powe
 def load_configuration_from_file(filepath: str) -> Tuple[Battery, List[PowerIC], List[Load], Dict[str, Any]]:
     """
     JSON 파일 경로를 입력받아 설정 객체들을 로드합니다.
-    (V6의와 동일한 헬퍼 함수)
     
     Args:
         filepath (str): 로드할 config.json 파일의 경로

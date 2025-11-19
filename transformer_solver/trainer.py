@@ -1,5 +1,11 @@
-# transformer_solver/trainer.py
-
+# Copyright (c) 2025 Minuk Lee. All rights reserved.
+# 
+# This source code is proprietary and confidential.
+# Unauthorized copying of this file, via any medium is strictly prohibited.
+# 
+# For licensing terms, see the LICENSE file.
+# Contact: minuklee@snu.ac.kr
+# 
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -114,7 +120,8 @@ class PocatTrainer:
         self.time_estimator = TimeEstimator(log_fn=self.log)
 
         # --- 4. 검증(Evaluate)용 데이터셋 ---
-        self.eval_batch_size = getattr(args, "eval_batch_size", 128)
+        #self.eval_batch_size = getattr(args, "eval_batch_size", 128)
+        self.eval_batch_size = 1
         # ⚠️ 대용량 정적 텐서(노드/행렬)는 GPU에 계속 올려두면
         #    한 번만 쓰더라도 VRAM을 크게 점유하므로,
         #    평가용 텐서는 CPU 메모리에만 보관합니다.
@@ -411,7 +418,7 @@ class PocatTrainer:
         )
 
         # (B, N_pomo)
-        reward = out["reward"].view(self.eval_batch_size, eval_samples)
+        reward = out["reward"].view(self.eval_batch_size, eval_samples)self.eval_batch_siz
         # 인스턴스별 최고 점수 (B,)
         best_reward_per_instance = reward.max(dim=1)[0]
 
@@ -541,7 +548,6 @@ class PocatTrainer:
                          filename_prefix: str = "solution"):
         """
         최종 TensorDict 상태를 기반으로 파워트리 시각화(PNG)를 저장합니다.
-        (V6 OR-Tools 수준의 상세 정보를 포함하도록 수정됨)
         """
 
         if self.result_dir is None: return
@@ -746,12 +752,20 @@ class PocatTrainer:
         total_active_power = battery_avg_voltage * total_active_current
 
         # 6. Graphviz 다이어그램 생성
+        # --- 👇 [신규] BOM 비용과 암전류 페널티 분리 계산 ---
+        total_bom_cost = sum(candidate_ics_map[name]['cost'] for name in used_ic_names)
+        sleep_penalty = max(0.0, final_cost - total_bom_cost) # (전체 - BOM = 페널티)
+        
+        label_str = (f"Transformer Solution (Start: {best_start_node_name})\\n"
+                     f"Total Cost: ${final_cost:.4f}\\n"
+                     f"(BOM: ${total_bom_cost:.2f} + Penalty: ${sleep_penalty:.4f})")
+
         dot = Digraph(comment=f"Power Tree - Cost ${final_cost:.4f}")
         dot.attr('node', shape='box', style='rounded,filled', fontname='Arial')
         
         margin_info = f"Current Margin: {constraints.get('current_margin', 0)*100:.0f}%"
         temp_info = f"Ambient Temp: {constraints.get('ambient_temperature', 25)}°C"
-        dot.attr(rankdir='LR', label=f"Transformer Solution (Start: {best_start_node_name})\n{margin_info}, {temp_info}\nCost: ${final_cost:.4f}", labelloc='t', fontname='Arial')
+        dot.attr(rankdir='LR', label=label_str, labelloc='t')
 
         max_sleep_current_target = constraints.get('max_sleep_current', 0.0)
         battery_label = (f"🔋 {battery_conf['name']}\n\n"

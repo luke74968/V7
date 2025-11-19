@@ -1,5 +1,11 @@
-# transformer_solver/expert_dataset.py
-
+# Copyright (c) 2025 Minuk Lee. All rights reserved.
+# 
+# This source code is proprietary and confidential.
+# Unauthorized copying of this file, via any medium is strictly prohibited.
+# 
+# For licensing terms, see the LICENSE file.
+# Contact: minuklee@snu.ac.kr
+# 
 import json
 import torch
 from torch.utils.data import Dataset
@@ -38,7 +44,7 @@ def expert_collate_fn(batch: List[Tuple[TensorDict, torch.Tensor]]) -> Tuple[Ten
 
 class ExpertReplayDataset(Dataset):
     """
-    "정답지" JSON 파일을 로드하고, V7 환경에서 리플레이(Replay)하여
+    "정답지" JSON 파일을 로드하고, 환경에서 리플레이(Replay)하여
     (State, Final_Reward) 페어(Pair)를 생성하는 지도학습용 데이터셋입니다.
     
     (Critic 사전훈련용)
@@ -51,7 +57,7 @@ class ExpertReplayDataset(Dataset):
         """
         Args:
             expert_data_path (str): "expert_data.json" 파일 경로.
-            env (PocatEnv): 리플레이를 실행할 V7 환경 인스턴스.
+            env (PocatEnv): 리플레이를 실행할 환경 인스턴스.
             device (str): 텐서 디바이스.
             N_max (int): 환경의 N_MAX 값.
         """
@@ -72,7 +78,7 @@ class ExpertReplayDataset(Dataset):
             print(f"❌ '정답지' 파일 로드 실패: {e}")
             expert_traces = []
 
-        # (config.json 파일별로 V7 Generator를 캐싱)
+        # (config.json 파일별로 Generator를 캐싱)
         generator_cache: Dict[str, PocatGenerator] = {}
 
         pbar = tqdm(expert_traces, desc="   - OR-Tools 경로 리플레이 중")
@@ -80,10 +86,10 @@ class ExpertReplayDataset(Dataset):
             try:
                 config_file = trace["config_file"]
                 target_reward = trace["target_reward"]
-                # V7 액션 시퀀스 (Parameterized Action 딕셔너리 리스트)
+                # 액션 시퀀스 (Parameterized Action 딕셔너리 리스트)
                 action_sequences: List[List[Dict[str, Any]]] = trace["action_sequences"]
                 
-                # 1. 정답지와 동일한 config로 V7 Generator 준비
+                # 1. 정답지와 동일한 config로 Generator 준비
                 if config_file not in generator_cache:
                     generator_cache[config_file] = PocatGenerator(
                         config_file_path=config_file,
@@ -98,9 +104,9 @@ class ExpertReplayDataset(Dataset):
                 for path_actions in action_sequences:
                     # 3. 환경 리셋 (B=1)
                     td_initial = generator(batch_size=1).to(self.device)
-                    td = self.env._reset(td_initial) # (N_MAX 크기의 V7 상태)
+                    td = self.env._reset(td_initial) # (N_MAX 크기의 상태)
                     
-                    # 4. '정답지'의 V7 액션을 한 스텝씩 리플레이
+                    # 4. '정답지'의 액션을 한 스텝씩 리플레이
                     for action_dict in path_actions:
                         
                         # (A) 리플레이: 현재 상태(td)와 정답 보상(target_reward)을 버퍼에 저장
@@ -110,7 +116,7 @@ class ExpertReplayDataset(Dataset):
                             target_reward_tensor.clone().squeeze(0) # (1,1) -> (1,)
                         ))
                         
-                        # (B) 다음 스텝으로 이동 (V7 액션 딕셔너리를 텐서로 변환)
+                        # (B) 다음 스텝으로 이동 (액션 딕셔너리를 텐서로 변환)
                         action_tensor_dict = {
                             "action_type": torch.tensor([[action_dict["action_type"]]], device=self.device),
                             "connect_target": torch.tensor([[action_dict["connect_target"]]], device=self.device),
