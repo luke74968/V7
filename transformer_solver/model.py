@@ -630,11 +630,18 @@ class PocatModel(nn.Module):
         # (B_total, T) -> (B_total)
         total_log_likelihood = torch.stack(log_probs, 1).sum(1)
 
+        # [추가] 최종 상태에서 비용 정보 추출
+        final_bom_cost = td["current_cost"].squeeze(-1)
+        final_sleep_cost = td["sleep_cost"].squeeze(-1)
+
+
         result = {
             "reward": total_reward,
             "log_likelihood": total_log_likelihood,
             "actions": actions,  # (디버깅용)
             "value": first_value,
+            "bom_cost": final_bom_cost, # [추가]
+            "sleep_cost": final_sleep_cost, # [추가]
         }
 
         if return_final_td:

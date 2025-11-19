@@ -20,7 +20,7 @@ REWARD_WEIGHT_ACTION = 0.0  # (A2C) 액션(IC 스폰) 즉시 비용에 대한 �
 REWARD_WEIGHT_PATH = 1.0    # (A2C) 경로(Load->BATT) 완성 시 누적 비용 가중치
 STEP_PENALTY = 0.0          # (A2C) 스텝당 페널티
 FAILURE_PENALTY = -500.0    # (A2C) 실패(막다른 길) 페널티
-PENALTY_WEIGHT_SLEEP = 500.0 # (A2C) 암전류 초과 페널티 가중치
+PENALTY_WEIGHT_SLEEP = 800.0 # (A2C) 암전류 초과 페널티 가중치
 
 
 class PocatEnv(EnvBase):
@@ -84,6 +84,7 @@ class PocatEnv(EnvBase):
             "step_count": UnboundedDiscrete(shape=(1,)),
             "current_cost": Unbounded(shape=(1,)),
             "staging_cost": Unbounded(shape=(1,)), # 현재 경로의 누적 비용
+            "sleep_cost": Unbounded(shape=(1,)), # [추가] 암전류 페널티 비용
             "is_used_ic_mask": Unbounded(shape=(num_nodes,), dtype=torch.bool),
             "current_target_load": UnboundedDiscrete(shape=(1,)),
             "is_exclusive_mask": Unbounded(shape=(num_nodes,), dtype=torch.long),
@@ -218,6 +219,7 @@ class PocatEnv(EnvBase):
             "step_count": torch.zeros(batch_size, 1, dtype=torch.long, device=self.device),
             "current_cost": torch.zeros(batch_size, 1, dtype=torch.float32, device=self.device),
             "staging_cost": torch.zeros(batch_size, 1, dtype=torch.float32, device=self.device),
+            "sleep_cost": torch.zeros(batch_size, 1, dtype=torch.float32, device=self.device), # [추가] 초기화
             "is_used_ic_mask": torch.zeros(batch_size, num_nodes, dtype=torch.bool, device=self.device),
             "current_target_load": torch.full((batch_size, 1), -1, dtype=torch.long, device=self.device),
             "is_exclusive_mask": torch.zeros(batch_size, num_nodes, dtype=torch.long, device=self.device),
@@ -293,6 +295,7 @@ class PocatEnv(EnvBase):
         next_obs["step_count"] = td["step_count"].clone()
         next_obs["current_cost"] = td["current_cost"].clone()
         next_obs["staging_cost"] = td["staging_cost"].clone()
+        next_obs["sleep_cost"] = td.get("sleep_cost", torch.zeros_like(td["current_cost"])).clone()
         next_obs["is_used_ic_mask"] = td["is_used_ic_mask"].clone()
         next_obs["current_target_load"] = td["current_target_load"].clone()
         if "is_exclusive_mask" in td.keys():
@@ -468,9 +471,11 @@ class PocatEnv(EnvBase):
                 parent_node        # 아니면 경로 추적 계속
             )
             
-            # 3d. 경로 완성 (R_path 보상)
-            if parent_is_battery.any():
-                finished_rows = b_idx_node[parent_is_battery]
+            # 3d. 경로 완성 (R_path 보상) [수정]
+            # parent_is_battery 대신 path_is_finished 조건을 사용하여
+            # 기존 트리에 연결된 경우(parent_already_has_parent)에도 비용을 정산하도록 변경
+            if path_is_finished.any():
+                finished_rows = b_idx_node[path_is_finished]
                 
                 # 경로 완성 시, 누적된 staging_cost를 R_path 보상으로 추가
                 sub_trajectory_total_cost = next_obs["staging_cost"][finished_rows]
@@ -510,14 +515,16 @@ class PocatEnv(EnvBase):
         next_obs["done"] = is_done.unsqueeze(-1)
 
         # --- 6. 최종 보상 계산 ---
-        final_reward = self.get_reward(
+        final_reward, sleep_penalty_val = self.get_reward( # [수정] 반환값 언패킹
             next_obs,
             step_reward, # (STEP_PENALTY + R_action + R_path)
             done_successfully,
             timed_out,
             is_stuck
         )
-        
+        # [추가] 페널티 값을 상태에 저장
+        next_obs["sleep_cost"] = sleep_penalty_val.unsqueeze(-1)
+
         # 이미 'done'이었던 샘플은 보상 0, 상태 롤백
         if is_already_done.any():
             final_reward[is_already_done] = 0.0
@@ -534,12 +541,14 @@ class PocatEnv(EnvBase):
                    step_reward: torch.Tensor,
                    done_successfully: torch.Tensor,
                    timed_out: torch.Tensor,
-                   is_stuck: torch.Tensor) -> torch.Tensor:
+                   is_stuck: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]: # [수정] 리턴 타입 변경
+
         """
         최종 스텝 보상을 계산합니다.
         (기본 스텝 보상 + 성공 시 암전류 페널티 or 실패 시 페널티)
         """
         reward = step_reward.clone()
+        sleep_penalty_record = torch.zeros_like(reward) # [추가] 페널티 기록용
 
         # 1. 성공한 경우: 암전류 제약 검사
         if done_successfully.any():
@@ -559,12 +568,15 @@ class PocatEnv(EnvBase):
             # reward에 페널티 차감
             reward[done_successfully] -= sleep_penalty
 
+            # [추가] 페널티 기록
+            sleep_penalty_record[done_successfully] = sleep_penalty
+
         # 2. 실패한 경우: 고정 페널티
         failed = (timed_out | is_stuck) & ~done_successfully
         if failed.any():
             reward[failed] = FAILURE_PENALTY
             
-        return reward
+        return reward, sleep_penalty_record # [수정] 튜플 반환
 
     # ---
     # 섹션 5: 액션 마스킹 (연산 집약적)
@@ -1058,7 +1070,7 @@ class PocatEnv(EnvBase):
         always_on_nodes[:, BATTERY_NODE_IDX] = True
         
         for _ in range(num_nodes):
-            parents_mask = (adj_matrix_T @ always_on_nodes.float().unsqueeze(-1)).squeeze(-1).bool()
+            parents_mask = (adj_matrix @ always_on_nodes.float().unsqueeze(-1)).squeeze(-1).bool()
             if (parents_mask & ~always_on_nodes).sum() == 0: break
             always_on_nodes |= parents_mask
         
@@ -1076,6 +1088,9 @@ class PocatEnv(EnvBase):
         
         ic_self_sleep[is_ao & is_used] = op_current[is_ao & is_used]
         ic_self_sleep[~is_ao & is_used & parent_is_ao] = use_ishut_current[~is_ao & is_used & parent_is_ao]
+
+        shut_mask = ~is_ao & is_used & parent_is_ao
+        ic_self_sleep[shut_mask] = shutdown_current[shut_mask]
 
         # 3. Load 암전류 소모
         load_sleep_draw_base = td["nodes"][..., FEATURE_INDEX["current_sleep"]].clone()

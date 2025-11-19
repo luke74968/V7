@@ -33,7 +33,8 @@ def update_progress(pbar, metrics, step):
     
     metrics_str = (
         f"Loss: {metrics['Loss']:.4f} "
-        f"($Avg: {metrics['Avg Cost']:.2f}, $Min: {metrics['Min Cost']:.2f})"
+        f"($Avg: {metrics['Avg Cost']:.2f}, $Min: {metrics['Min Cost']:.2f}) | " # [수정] 포맷 변경
+        f"BOM ${metrics['Avg BOM']:.2f} + Sleep {metrics['Avg Sleep']:.1f}"       # [추가] 세부 비용 표시
     )
     pbar.set_postfix_str(metrics_str, refresh=False)
     pbar.update(1)
@@ -279,6 +280,9 @@ class PocatTrainer:
                 reward = out["reward"].view(-1, num_starts)
                 log_likelihood = out["log_likelihood"].view(-1, num_starts)
                 value = out["value"].view(-1, num_starts)
+                # [추가] 비용 정보 가져오기
+                bom_cost = out["bom_cost"].view(-1, num_starts)
+                sleep_cost = out["sleep_cost"].view(-1, num_starts)
 
                 # Critic Loss (V(s)가 실제 보상(G)을 예측하도록)
                 critic_loss = F.mse_loss(value, reward)
@@ -308,6 +312,9 @@ class PocatTrainer:
                 # (DDP) 0번 GPU에서만 로그 기록
                 if self.local_rank <= 0:
                     avg_cost = -reward.mean().item()
+                    # [추가] 평균 BOM 및 Sleep Cost 계산
+                    avg_bom = bom_cost.mean().item()
+                    avg_sleep = sleep_cost.mean().item()
                     min_batch_cost = -reward.max().item()
                     min_epoch_cost = min(min_epoch_cost, min_batch_cost)
 
@@ -322,6 +329,8 @@ class PocatTrainer:
                             "Loss": loss.item(),
                             "Avg Cost": total_cost / step,
                             "Min Cost": min_epoch_cost,
+                            "Avg BOM": avg_bom,    # [추가]
+                            "Avg Sleep": avg_sleep # [추가]
                         },
                         step
                     )
