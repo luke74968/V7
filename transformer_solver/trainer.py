@@ -76,7 +76,7 @@ class PocatTrainer:
             self.model = DDP(
                 self.model, 
                 device_ids=[self.local_rank], 
-                find_unused_parameters=False # (모델은 모든 파라미터 사용)
+                find_unused_parameters=True # (모델은 모든 파라미터 사용)
             )
         
         if self.local_rank <= 0:
@@ -241,8 +241,8 @@ class PocatTrainer:
             self.model.train()
             
             # (DDP) DDP Sampler가 에폭마다 시드를 변경하도록 설정
-            if self.is_ddp and hasattr(self.env_dataset, 'sampler'):
-                self.env_dataset.sampler.set_epoch(epoch)
+            #if self.is_ddp and hasattr(self.env_dataset, 'sampler'):
+            #    self.env_dataset.sampler.set_epoch(epoch)
             
             total_steps = args.trainer_params['train_step']
             
@@ -418,7 +418,7 @@ class PocatTrainer:
         )
 
         # (B, N_pomo)
-        reward = out["reward"].view(self.eval_batch_size, eval_samples)self.eval_batch_siz
+        reward = out["reward"].view(self.eval_batch_size, eval_samples)
         # 인스턴스별 최고 점수 (B,)
         best_reward_per_instance = reward.max(dim=1)[0]
 
@@ -753,7 +753,16 @@ class PocatTrainer:
 
         # 6. Graphviz 다이어그램 생성
         # --- 👇 [신규] BOM 비용과 암전류 페널티 분리 계산 ---
-        total_bom_cost = sum(candidate_ics_map[name]['cost'] for name in used_ic_names)
+        #total_bom_cost = sum(candidate_ics_map[name]['cost'] for name in used_ic_names)
+
+        # --- [수정 후] 노드 피처 텐서에서 직접 Cost 합산 ---
+        total_bom_cost = 0.0
+        # active_ics_indices는 함수 상단(4번 섹션)에서 이미 구해져 있습니다.
+        for ic_idx in active_ics_indices:
+            # FEATURE_INDEX["cost"] = 5 (definitions.py 기준)
+            node_cost = all_nodes_features[ic_idx, FEATURE_INDEX["cost"]].item()
+            total_bom_cost += node_cost
+            
         sleep_penalty = max(0.0, final_cost - total_bom_cost) # (전체 - BOM = 페널티)
         
         label_str = (f"Transformer Solution (Start: {best_start_node_name})\\n"

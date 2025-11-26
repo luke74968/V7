@@ -16,7 +16,7 @@ model_params:
 # 옵티마이저 및 스케줄러 파라미터
 optimizer_params:
     optimizer:
-        lr: 2e-4
+        lr: 5e-3
         weight_decay: 1e-6
     max_grad_norm: 1.0        
     scheduler:

@@ -26,7 +26,7 @@ REWARD_WEIGHT_ACTION = 0.0  # (A2C) 액션(IC 스폰) 즉시 비용에 대한 �
 REWARD_WEIGHT_PATH = 1.0    # (A2C) 경로(Load->BATT) 완성 시 누적 비용 가중치
 STEP_PENALTY = 0.0          # (A2C) 스텝당 페널티
 FAILURE_PENALTY = -500.0    # (A2C) 실패(막다른 길) 페널티
-PENALTY_WEIGHT_SLEEP = 800.0 # (A2C) 암전류 초과 페널티 가중치
+PENALTY_WEIGHT_SLEEP = 2000.0 # (A2C) 암전류 초과 페널티 가중치
 
 
 class PocatEnv(EnvBase):

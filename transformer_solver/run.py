@@ -157,8 +157,8 @@ if __name__ == "__main__":
     
     # (DDP 랭크 0만 디렉토리 생성 시도)
     local_rank_init = int(os.environ.get('LOCAL_RANK', 0))
-    if local_rank_init <= 0:
-        os.makedirs(args.result_dir, exist_ok=True)
+    #if local_rank_init <= 0:
+    os.makedirs(args.result_dir, exist_ok=True)
         
     logger = setup_logger(args.result_dir, rank=local_rank_init)
     args.log = logger.info

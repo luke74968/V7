@@ -593,6 +593,10 @@ class PocatModel(nn.Module):
                     action_type_val = action_type[sample_idx].item()
                     connect_target_val = action_connect[sample_idx].item()
                     spawn_template_val = action_spawn[sample_idx].item()
+
+                    score_val = final_log_prob[sample_idx].item()        # Log Probability (점수)
+                    prob_val = final_log_prob[sample_idx].exp().item()   # Probability (0~1)
+                    prob_pct = prob_val * 100.0                          # Percentage (%)
                     
                     if action_type_val == 0:
                         action_str = f"Connect (Type: 0, Head idx: {current_head} -> Target idx: {connect_target_val})"
@@ -601,7 +605,7 @@ class PocatModel(nn.Module):
                         slot_idx = td['next_empty_slot_idx'][sample_idx].item()
                         action_str = f"Spawn (Type: 1, Head idx: {current_head} | Template idx: {spawn_template_val} -> Slot idx: {slot_idx})"
                         
-                    log_fn(f"  [Step {decoding_step:02d}] Action: {action_str}")
+                    log_fn(f"  [Step {decoding_step:02d}] Action: {action_str} | Score: {score_val:.4f}, Prob: {prob_pct:.2f}%")
             # [END]: 'detail' 모드 액션 로깅
 
             # 6. 환경 스텝 실행
