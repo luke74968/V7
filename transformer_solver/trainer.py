@@ -39,8 +39,8 @@ def update_progress(pbar, metrics, step):
     
     metrics_str = (
         f"Loss: {metrics['Loss']:.4f} "
-        f"($Avg: {metrics['Avg Cost']:.2f}, $Min: {metrics['Min Cost']:.2f}) | " # [수정] 포맷 변경
-        f"BOM ${metrics['Avg BOM']:.2f} + Sleep {metrics['Avg Sleep']:.1f}"       # [추가] 세부 비용 표시
+        f"($Avg: {metrics['Avg Cost']:.2f}, $AvgMin: {metrics['Avg Min Batch']:.2f}, $Min: {metrics['Min Cost']:.2f}) | "
+        f"BOM ${metrics['Avg BOM']:.2f} + Sleep {metrics['Avg Sleep']:.1f}"
     )
     pbar.set_postfix_str(metrics_str, refresh=False)
     pbar.update(1)
@@ -257,6 +257,7 @@ class PocatTrainer:
             
             total_loss = 0.0
             total_cost = 0.0
+            total_min_batch_cost = 0.0 
             total_policy_loss = 0.0
             total_critic_loss = 0.0
             min_epoch_cost = float('inf')
@@ -290,7 +291,8 @@ class PocatTrainer:
                 # [추가] 비용 정보 가져오기
                 bom_cost = out["bom_cost"].view(-1, num_starts)
                 sleep_cost = out["sleep_cost"].view(-1, num_starts)
-
+                """
+                Critic 부분 
                 # Critic Loss (V(s)가 실제 보상(G)을 예측하도록)
                 critic_loss = F.mse_loss(value, reward)
 
@@ -300,7 +302,12 @@ class PocatTrainer:
 
                 # Total Loss (A2C)
                 loss = policy_loss + 0.5 * critic_loss
-                
+                """
+                baseline = reward.mean(dim=1, keepdim=True)   # POMO baseline
+                advantage = reward - baseline
+                policy_loss = -(advantage * log_likelihood).mean()
+                loss = policy_loss    # actor only
+
                 # 5. 역전파 및 가중치 업데이트
                 loss.backward()
                 
@@ -319,10 +326,10 @@ class PocatTrainer:
                 # (DDP) 0번 GPU에서만 로그 기록
                 if self.local_rank <= 0:
                     avg_cost = -reward.mean().item()
-                    # [추가] 평균 BOM 및 Sleep Cost 계산
                     avg_bom = bom_cost.mean().item()
                     avg_sleep = sleep_cost.mean().item()
                     min_batch_cost = -reward.max().item()
+                    total_min_batch_cost += min_batch_cost
                     min_epoch_cost = min(min_epoch_cost, min_batch_cost)
 
                     total_loss += loss.item()
@@ -335,6 +342,7 @@ class PocatTrainer:
                         {
                             "Loss": loss.item(),
                             "Avg Cost": total_cost / step,
+                            "Avg Min Batch": total_min_batch_cost / step, # [추가] 배치별 최소값의 평균
                             "Min Cost": min_epoch_cost,
                             "Avg BOM": avg_bom,    # [추가]
                             "Avg Sleep": avg_sleep # [추가]

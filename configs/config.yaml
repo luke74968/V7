@@ -4,7 +4,7 @@
 model_params:
    N_MAX: 200
    embedding_dim: 256
-   encoder_layer_num: 2
+   encoder_layer_num: 6
    qkv_dim: 16
    head_num: 16
    ff_hidden_dim: 512
@@ -16,7 +16,7 @@ model_params:
 # 옵티마이저 및 스케줄러 파라미터
 optimizer_params:
     optimizer:
-        lr: 5e-3
+        lr: 5e-6
         weight_decay: 1e-6
     max_grad_norm: 1.0        
     scheduler:

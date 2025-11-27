@@ -53,7 +53,7 @@ python3 -m transformer_solver.run --config_file configs/config_6.json --config_y
 # 훈련된 모델(.pth)을 사용하여 config_IEIE 문제 풀기
 python3 -m transformer_solver.run --test_only --config_file configs/config_IEIE.json --config_yaml configs/config.yaml --log_mode detail --load_path "result_transformer/2025-1113-130542/epoch-25.pth
 
-
+torchrun --standalone --nproc_per_node=2 -m transformer_solver.run --config_file configs/config_IEIE.json --config_yaml configs/config.yaml --batch_size 8  --log_mode progress
 
 ### 디버그 (Debug)
 

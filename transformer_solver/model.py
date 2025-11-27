@@ -433,7 +433,14 @@ class PocatModel(nn.Module):
         self.prompt_net = PocatPromptNet(N_MAX=n_max_value, **model_params)
         self.encoder = PocatEncoder(**model_params)
         self.decoder = PocatDecoder(N_MAX=n_max_value, **model_params)
-    
+
+    def _get_masked_probs(self, logits, mask):
+        """ 로짓과 마스크를 받아 정규화된 확률 분포를 반환합니다. """
+        scores = self.logit_clipping * torch.tanh(logits)
+        scores.masked_fill_(~mask, -float('inf'))
+        probs = F.softmax(scores, dim=-1)
+        return probs  
+
     def _sample_action(self, logits, mask, decode_type):
         """ 
         로짓과 마스크를 받아 액션(idx)과 로그 확률(log_prob)을 반환합니다.
@@ -583,29 +590,77 @@ class PocatModel(nn.Module):
                 "spawn_template": action_spawn.unsqueeze(-1),
             }
             
-            # [START]: 'detail' 모드 액션 로깅
+            # [START]: 'detail' 모드 액션 로깅 (수정됨)
             if log_fn and log_mode == 'detail':
-                # (첫 번째 샘플(B_total=0) 기준으로 로그)
+                # (첫 번째 샘플(B=0) 기준으로 로그 출력)
                 sample_idx = 0
                 if sample_idx < td.batch_size[0]:
                     current_head = td["trajectory_head"][sample_idx].item()
                     
-                    action_type_val = action_type[sample_idx].item()
-                    connect_target_val = action_connect[sample_idx].item()
-                    spawn_template_val = action_spawn[sample_idx].item()
+                    # --- 1. 확률 분포 계산 ---
+                    # (위에서 정의한 _get_masked_probs 사용)
+                    probs_type = self._get_masked_probs(logits_type[sample_idx], masks["mask_type"][sample_idx])
+                    probs_connect = self._get_masked_probs(logits_connect[sample_idx], masks["mask_connect"][sample_idx])
+                    probs_spawn = self._get_masked_probs(logits_spawn[sample_idx], masks["mask_spawn"][sample_idx])
 
-                    score_val = final_log_prob[sample_idx].item()        # Log Probability (점수)
-                    prob_val = final_log_prob[sample_idx].exp().item()   # Probability (0~1)
-                    prob_pct = prob_val * 100.0                          # Percentage (%)
+                    # --- 2. 이름 매핑 준비 ---
+                    # (환경 설정에서 정적 이름 목록 가져오기)
+                    node_names = env.generator.config.node_names
+                    def get_name(idx):
+                        if 0 <= idx < len(node_names): return node_names[idx]
+                        return f"Spawned_Node_{idx}" # 동적 생성된 노드는 인덱스로 표시
+
+                    head_name = get_name(current_head)
                     
-                    if action_type_val == 0:
-                        action_str = f"Connect (Type: 0, Head idx: {current_head} -> Target idx: {connect_target_val})"
-                    else: # action_type_val == 1 (Spawn)
-                        # 다음 슬롯 인덱스는 env.step() 직전에 사용되므로 여기서는 현재 값 로깅
-                        slot_idx = td['next_empty_slot_idx'][sample_idx].item()
-                        action_str = f"Spawn (Type: 1, Head idx: {current_head} | Template idx: {spawn_template_val} -> Slot idx: {slot_idx})"
+                    log_fn(f"\n[Step {decoding_step:02d}] Current Head: {head_name} (idx: {current_head})")
+
+                    # --- 3. Action Type 확률 출력 ---
+                    p_conn = probs_type[0].item()
+                    p_spwn = probs_type[1].item()
+                    
+                    chosen_type = action_type[sample_idx].item()
+                    type_str = "Connect" if chosen_type == 0 else "Spawn"
+                    
+                    log_fn(f"  📊 Action Type Probabilities:")
+                    log_fn(f"     - Connect: {p_conn*100:.2f}% {'👈 Selected' if chosen_type==0 else ''}")
+                    log_fn(f"     - Spawn  : {p_spwn*100:.2f}% {'👈 Selected' if chosen_type==1 else ''}")
+
+                    # --- 4. 상세 후보 확률 출력 ---
+                    
+                    # (A) Connect 후보들
+                    if masks["mask_type"][sample_idx, 0]: # Connect가 가능한 경우만
+                        log_fn(f"  🔗 Connect Candidates (P(Target | Connect)):")
+                        valid_connect_indices = torch.where(masks["mask_connect"][sample_idx])[0]
                         
-                    log_fn(f"  [Step {decoding_step:02d}] Action: {action_str} | Score: {score_val:.4f}, Prob: {prob_pct:.2f}%")
+                        # 확률순 정렬
+                        cand_probs = []
+                        for idx in valid_connect_indices:
+                            prob = probs_connect[idx].item()
+                            cand_probs.append((prob, idx.item()))
+                        cand_probs.sort(key=lambda x: x[0], reverse=True)
+
+                        for prob, idx in cand_probs:
+                            name = get_name(idx)
+                            is_picked = (chosen_type == 0 and action_connect[sample_idx].item() == idx)
+                            log_fn(f"     - {name:<25} : {prob*100:.2f}% {'✅' if is_picked else ''}")
+                    
+                    # (B) Spawn 후보들
+                    if masks["mask_type"][sample_idx, 1]: # Spawn이 가능한 경우만
+                        log_fn(f"  📦 Spawn Candidates (P(Template | Spawn)):")
+                        valid_spawn_indices = torch.where(masks["mask_spawn"][sample_idx])[0]
+                        
+                        cand_probs = []
+                        for idx in valid_spawn_indices:
+                            prob = probs_spawn[idx].item()
+                            cand_probs.append((prob, idx.item()))
+                        cand_probs.sort(key=lambda x: x[0], reverse=True)
+
+                        for prob, idx in cand_probs:
+                            name = get_name(idx)
+                            is_picked = (chosen_type == 1 and action_spawn[sample_idx].item() == idx)
+                            log_fn(f"     - {name:<25} : {prob*100:.2f}% {'✅' if is_picked else ''}")
+
+                    log_fn("-" * 60)
             # [END]: 'detail' 모드 액션 로깅
 
             # 6. 환경 스텝 실행
