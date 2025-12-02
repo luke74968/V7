@@ -320,7 +320,7 @@ class PocatTrainer:
                 if self.is_ddp:
                     dist.all_reduce(loss, op=dist.ReduceOp.AVG)
                     dist.all_reduce(policy_loss, op=dist.ReduceOp.AVG)
-                    dist.all_reduce(critic_loss, op=dist.ReduceOp.AVG)
+                    #dist.all_reduce(critic_loss, op=dist.ReduceOp.AVG)
                     # (min_cost는 all_reduce(op=dist.ReduceOp.MIN) 필요)
                 
                 # (DDP) 0번 GPU에서만 로그 기록
@@ -335,7 +335,7 @@ class PocatTrainer:
                     total_loss += loss.item()
                     total_cost += avg_cost
                     total_policy_loss += policy_loss.item()
-                    total_critic_loss += critic_loss.item()
+                    #total_critic_loss += critic_loss.item()
 
                     update_progress(
                         train_pbar,
@@ -363,7 +363,7 @@ class PocatTrainer:
                     f"Epoch {epoch}/{args.trainer_params['epochs']} | "
                     f"Avg Loss {total_loss / total_steps:.4f} | "
                     f"P_Loss {total_policy_loss / total_steps:.4f} | "
-                    f"V_Loss {total_critic_loss / total_steps:.4f} | "
+                    #f"V_Loss {total_critic_loss / total_steps:.4f} | "
                     f"Min Cost ${min_epoch_cost:.2f}"
                 )
                 tqdm.write(epoch_summary)

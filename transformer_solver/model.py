@@ -146,6 +146,56 @@ class EncoderLayer(nn.Module):
         out = self.normalization2(h + ffn_out) # Residual + Norm
         return out
 
+class PocatDecoderLayer(nn.Module):
+    """
+    Cross-Attention과 FFN으로 구성된 디코더 레이어
+    (Query가 1개이므로 Self-Attention은 생략하고 Cross-Attention에 집중)
+    """
+    def __init__(self, embedding_dim, head_num, qkv_dim, **model_params):
+        super().__init__()
+        
+        # 1. Cross-Attention (Query는 이전 레이어 출력, Key/Val은 인코더 출력)
+        self.Wq = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        # (Wk, Wv는 인코더 쪽에서 미리 계산된 캐시를 재사용하거나, 여기서 별도 정의 가능)
+        # 효율성을 위해 여기서는 인코더의 K, V를 공유(Sharing)하거나 
+        # 별도로 투영(Projection)할 수 있습니다. 여기서는 별도 투영을 가정합니다.
+        self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        
+        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        
+        self.norm1 = Normalization(embedding_dim, **model_params)
+        self.norm2 = Normalization(embedding_dim, **model_params)
+        
+        # 2. Feed Forward Network
+        self.feed_forward = ParallelGatedMLP(hidden_size=embedding_dim, **model_params)
+        
+        self.head_num = head_num
+        self.qkv_dim = qkv_dim
+
+    def forward(self, x, encoder_out):
+        """
+        x: (B, 1, D) - 현재 디코더의 Query 상태
+        encoder_out: (B, N, D) - 인코더 출력 (Context)
+        """
+        # --- Cross Attention ---
+        # Query: 현재 레이어의 입력 x
+        q = reshape_by_heads(self.Wq(x), self.head_num)
+        
+        # Key, Value: 인코더 출력 (매 레이어마다 새로 계산하여 표현력 증대)
+        k = reshape_by_heads(self.Wk(encoder_out), self.head_num)
+        v = reshape_by_heads(self.Wv(encoder_out), self.head_num)
+        
+        mha_out = multi_head_attention(q, k, v)
+        mha_out = self.multi_head_combine(mha_out)
+        
+        h = self.norm1(x + mha_out) # Residual + Norm
+        
+        # --- FFN ---
+        ffn_out = self.feed_forward(h)
+        out = self.norm2(h + ffn_out) # Residual + Norm
+        
+        return out
 # ---
 # 섹션 2: 디코딩 효율을 위한 캐시
 # ---
@@ -157,8 +207,8 @@ class PrecomputedCache:
     인코더의 Key, Value 값을 저장하는 캐시 객체입니다.
     """
     node_embeddings: torch.Tensor
-    glimpse_key: torch.Tensor
-    glimpse_val: torch.Tensor
+    #glimpse_key: torch.Tensor
+    #glimpse_val: torch.Tensor
     logit_key_connect: torch.Tensor # 'Connect' 포인터용 Key
     logit_key_spawn: torch.Tensor   # 'Spawn' 포인터용 Key
 
@@ -166,8 +216,8 @@ class PrecomputedCache:
         """ POMO 샘플링을 위해 캐시를 N_starts 배수만큼 복제합니다. """
         return PrecomputedCache(
             batchify(self.node_embeddings, num_starts),
-            batchify(self.glimpse_key, num_starts),
-            batchify(self.glimpse_val, num_starts),
+            #batchify(self.glimpse_key, num_starts),
+            #batchify(self.glimpse_val, num_starts),
             batchify(self.logit_key_connect, num_starts),
             batchify(self.logit_key_spawn, num_starts),
         )
@@ -316,13 +366,6 @@ class PocatEncoder(nn.Module):
 
 
 class PocatDecoder(nn.Module):
-    """
-    Parameterized Action Decoder (4-Head).
-    
-    1. 현재 상태(Head, Global)로 컨텍스트 쿼리(q_vec) 생성
-    2. q_vec을 4개의 헤드(Value, Type, Connect, Spawn)로 분배
-    3. 4개의 동시 결정(Logits/Value)을 출력
-    """
     def __init__(self, embedding_dim, head_num, qkv_dim, N_MAX, **model_params):
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -330,91 +373,73 @@ class PocatDecoder(nn.Module):
         self.qkv_dim = qkv_dim
         self.N_MAX = N_MAX
         
-        # 1. 컨텍스트 쿼리(q_vec) 생성용 MHA
-        self.Wk_glimpse = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        self.Wv_glimpse = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        self.Wq_context = nn.Linear(embedding_dim + 3, head_num * qkv_dim, bias=False)
-        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        # config.yaml에서 decoder_layer_num을 가져옵니다 (기본값 1)
+        self.layer_num = model_params.get('decoder_layer_num', 1)
+
+        # 1. 초기 컨텍스트 쿼리 생성용 (입력 차원 변환)
+        # (embedding_dim + 3 features) -> embedding_dim
+        self.input_projector = nn.Linear(embedding_dim + 3, embedding_dim)
+
+        # 2. 디코더 레이어 스택 (ModuleList)
+        self.layers = nn.ModuleList([
+            PocatDecoderLayer(embedding_dim, head_num, qkv_dim, **model_params)
+            for _ in range(self.layer_num)
+        ])
         
-        # 2. 포인터 네트워크용 Key 생성 (인코더 임베딩을 변환)
+        # 3. 포인터 네트워크용 Key 생성 (인코더 임베딩을 변환)
         self.Wk_connect_logit = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.Wk_spawn_logit = nn.Linear(embedding_dim, embedding_dim, bias=False)
 
-        # --- 3. 4-Heads (q_vec을 입력으로 받음) ---
-        
-        # 3a. Critic Head (A2C)
+        # --- 4. 4-Heads (q_vec을 입력으로 받음) ---
         self.value_head = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim // 2),
             nn.ReLU(),
-            nn.Linear(embedding_dim // 2, 1) # (B, 1, 1) -> (B, 1)
+            nn.Linear(embedding_dim // 2, 1)
         )
-        
-        # 3b. Action Type Head (0: Connect, 1: Spawn)
         self.type_head = nn.Linear(embedding_dim, 2)
-        
-        # 3c. Connect Target Head (Pointer)
         self.connect_head = nn.Linear(embedding_dim, embedding_dim)
-        
-        # 3d. Spawn Template Head (Pointer)
         self.spawn_head = nn.Linear(embedding_dim, embedding_dim)
-
 
     def forward(self, td: TensorDict, cache: PrecomputedCache) -> Tuple[torch.Tensor, ...]:
         
-        # 1. 디코더 쿼리(q_vec) 생성 (A2C Critic과 Actor가 공유)
-        
-        # (avg_current, unconnected_ratio, step_ratio) 3개 피처 생성
+        # 1. 초기 쿼리 입력 준비
         avg_current = td["nodes"][..., FEATURE_INDEX["current_out"]].clone().mean(dim=1, keepdim=True)
         unconnected_ratio = td["unconnected_loads_mask"].clone().float().mean(dim=1, keepdim=True)
         step_ratio = td["step_count"].clone().float() / (2 * self.N_MAX)
-
         state_features = torch.cat([avg_current, unconnected_ratio, step_ratio], dim=1)
 
-        # 현재 Head 노드의 임베딩 가져오기
-        # NOTE:
-        #   td["trajectory_head"]는 환경 단계(env.step)에서 in-place로 갱신된다.
-        #   squeeze(-1)만 호출하면 동일한 저장소(storage)를 공유하게 되며,
-        #   이후 env.step에서 해당 텐서를 수정할 때 autograd가 저장해둔 인덱스가
-        #   변경되어 버려 역전파 시 "modified by an inplace operation" 오류가 발생한다.
-        #   clone()으로 독립적인 텐서를 만들어 안전하게 사용한다.
         head_idx = td["trajectory_head"].detach().squeeze(-1).clone()
         batch_indices = torch.arange(td.batch_size[0], device=head_idx.device)
         head_emb = cache.node_embeddings[batch_indices, head_idx]
         
-        # 쿼리 입력: (Head 임베딩 + 3개 상태 피처)
-        query_input = torch.cat([head_emb, state_features], dim=1)
+        # (B, D+3) -> (B, 1, D)
+        query_input = torch.cat([head_emb, state_features], dim=1).unsqueeze(1)
         
-        # 컨텍스트 쿼리(q) 생성
-        q_context = reshape_by_heads(self.Wq_context(query_input.unsqueeze(1)), self.head_num)
-        
-        # MHA 수행
-        mha_out = multi_head_attention(q_context, cache.glimpse_key, cache.glimpse_val)
-        
-        # (B, 1, D) - 모든 헤드가 공유할 최종 컨텍스트 벡터
-        q_vec = self.multi_head_combine(mha_out) 
+        # 초기 q_vec (Projection)
+        q_vec = self.input_projector(query_input)
 
-        # --- 2. 4개의 헤드로 q_vec 분배 ---
+        # 2. 디코더 레이어 순차 통과 (Stacking)
+        # q_vec이 각 레이어를 거치며 점점 더 정교한 Context Vector가 됩니다.
+        encoder_out = cache.node_embeddings # (B, N, D)
         
-        # 2a. Critic Value (B, 1)
+        for layer in self.layers:
+            q_vec = layer(q_vec, encoder_out)
+
+        # --- 3. 최종 결정 (Heads) ---
         value = self.value_head(q_vec).squeeze(-1)
-        
-        # 2b. Action Type Logits (B, 2)
         logits_action_type = self.type_head(q_vec).squeeze(1)
         
-        # 2c. Connect Target Logits (B, N_MAX)
-        query_connect = self.connect_head(q_vec) # (B, 1, D)
+        query_connect = self.connect_head(q_vec) 
         logits_connect_target = torch.matmul(
             query_connect, cache.logit_key_connect
         ).squeeze(1) / (self.embedding_dim ** 0.5)
         
-        # 2d. Spawn Template Logits (B, N_MAX)
-        query_spawn = self.spawn_head(q_vec) # (B, 1, D)
+        query_spawn = self.spawn_head(q_vec) 
         logits_spawn_template = torch.matmul(
             query_spawn, cache.logit_key_spawn
         ).squeeze(1) / (self.embedding_dim ** 0.5)
 
         return logits_action_type, logits_connect_target, logits_spawn_template, value
-
 
 class PocatModel(nn.Module):
     """
@@ -503,8 +528,8 @@ class PocatModel(nn.Module):
         encoded_nodes = self.encoder(td, prompt_embedding) # (B, N_MAX, D)
         
         # 디코더가 사용할 Key/Value 사전 계산
-        glimpse_key = reshape_by_heads(self.decoder.Wk_glimpse(encoded_nodes), self.decoder.head_num)
-        glimpse_val = reshape_by_heads(self.decoder.Wv_glimpse(encoded_nodes), self.decoder.head_num)
+        #glimpse_key = reshape_by_heads(self.decoder.Wk_glimpse(encoded_nodes), self.decoder.head_num)
+        #glimpse_val = reshape_by_heads(self.decoder.Wv_glimpse(encoded_nodes), self.decoder.head_num)
         
         # 포인터 헤드별 Key 생성
         logit_key_connect = self.decoder.Wk_connect_logit(encoded_nodes).transpose(1, 2)
@@ -512,8 +537,8 @@ class PocatModel(nn.Module):
         
         cache = PrecomputedCache(
             node_embeddings=encoded_nodes,
-            glimpse_key=glimpse_key,
-            glimpse_val=glimpse_val,
+            #glimpse_key=glimpse_key,
+            #glimpse_val=glimpse_val,
             logit_key_connect=logit_key_connect,
             logit_key_spawn=logit_key_spawn
         )

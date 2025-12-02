@@ -5,6 +5,7 @@ model_params:
    N_MAX: 200
    embedding_dim: 256
    encoder_layer_num: 6
+   decoder_layer_num: 3
    qkv_dim: 16
    head_num: 16
    ff_hidden_dim: 512

@@ -59,7 +59,7 @@ torchrun --standalone --nproc_per_node=2 -m transformer_solver.run --config_file
 
 # config_6 문제로 대화형 디버거 실행
 # (config.yaml의 N_MAX=500과 동일한 값을 --n_max로 전달)
-python3 -m transformer_solver.debug_env configs/config_6.json --n_max 500
+python3 -m transformer_solver.debug_env configs/config_IEIE.json --n_max 200
 
 
 

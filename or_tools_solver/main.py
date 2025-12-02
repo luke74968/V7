@@ -91,7 +91,7 @@ def main():
         pruned_candidate_ics, loads, battery, constraints, sanitized_ic_groups
     )
     
-        solver = cp_model.CpSolver()
+    solver = cp_model.CpSolver()
     solver.parameters.log_search_progress = True
     solver.parameters.max_time_in_seconds = 300.0 
     
