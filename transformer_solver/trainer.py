@@ -26,6 +26,7 @@ from .model import PocatModel, PrecomputedCache, reshape_by_heads
 from .solver_env import PocatEnv, BATTERY_NODE_IDX
 from .expert_dataset import ExpertReplayDataset, expert_collate_fn
 from .utils.common import TimeEstimator, clip_grad_norms, unbatchify, batchify
+from .utils.augmentation import augment_data 
 
 # --- 시각화 모듈 임포트 ---
 from graphviz import Digraph
@@ -262,13 +263,24 @@ class PocatTrainer:
             total_critic_loss = 0.0
             min_epoch_cost = float('inf')
 
+            # [추가] 엔트로피 가중치 스케줄링 (Exponential Decay)
+            # Epoch 1: 0.05 -> Epoch 20: ~0.019 -> Epoch 50: ~0.004
+            current_entropy_weight = max(0.001, 0.05 * (0.95 ** (epoch - 1)))
+
             for step in range(1, total_steps + 1):
                 self.optimizer.zero_grad()
                 
                 # 1. 환경 리셋
                 # (DDP 사용 시, 각 GPU는 B/N 개의 배치를 처리)
                 td = self.env.reset(batch_size=args.batch_size)
-                
+                original_batch_size = args.batch_size # 원본 배치 크기 저장
+
+                # ✨ [NEW] Augmentation 적용 (예: x4 증강)
+                #    Batch 128 -> 512로 뻥튀기됨 (Load 순서가 섞인 버전들)
+                #    POMO까지 합치면: 128(B) * 4(Aug) * 8(POMO) = 4096개의 경로 탐색
+                if args.use_augmentation:
+                    td = augment_data(td, self.env, n_aug=8)
+
                 # 2. POMO (Multi-Start) 확장
                 num_starts = self.env.generator.num_loads
 #               POMO 중복이므로 주석 처리 ( model.py 에서도 batchify(td, num_starts) 중복수행중이었음 ) 
@@ -284,19 +296,22 @@ class PocatTrainer:
                 )
                 
                 # 4. A2C 손실 계산
-                # (B, N_pomo)
-                reward = out["reward"].view(-1, num_starts)
-                log_likelihood = out["log_likelihood"].view(-1, num_starts)
-                value = out["value"].view(-1, num_starts)
-                # [추가] 비용 정보 가져오기
-                bom_cost = out["bom_cost"].view(-1, num_starts)
-                sleep_cost = out["sleep_cost"].view(-1, num_starts)
+                # (B_total, 1) -> (B_origin, N_aug * N_pomo) 로 재배열
+                # 이렇게 해야 증강된 모든 버전과 POMO 시도들이 '한 그룹'으로 묶여 경쟁합니다.
+                reward = out["reward"].view(original_batch_size, -1)
+                log_likelihood = out["log_likelihood"].view(original_batch_size, -1)
+                
+                # (Value 등은 로깅용이므로 shape 유지해도 무방하지만, 계산 통일성을 위해 맞춤)
+                # value = out["value"].view(original_batch_size, -1)
+                bom_cost = out["bom_cost"].view(original_batch_size, -1)
+                sleep_cost = out["sleep_cost"].view(original_batch_size, -1)
                 """
                 Critic 부분 
                 # Critic Loss (V(s)가 실제 보상(G)을 예측하도록)
                 critic_loss = F.mse_loss(value, reward)
 
                 # Policy Loss (Actor)
+                # baseline: (B_origin, 1) -> 각 문제별 (Aug*POMO) 전체 평균
                 advantage = reward - value.detach() # Baseline = V(s)
                 policy_loss = -(advantage * log_likelihood).mean()
 
@@ -306,7 +321,11 @@ class PocatTrainer:
                 baseline = reward.mean(dim=1, keepdim=True)   # POMO baseline
                 advantage = reward - baseline
                 policy_loss = -(advantage * log_likelihood).mean()
-                loss = policy_loss    # actor only
+
+                # [추가] 엔트로피 손실 추가 (Maximize Entropy)
+                # loss = Policy_Loss - (Weight * Entropy)
+                entropy_loss = - current_entropy_weight * out["entropy"].mean()
+                loss = policy_loss + entropy_loss
 
                 # 5. 역전파 및 가중치 업데이트
                 loss.backward()

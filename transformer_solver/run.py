@@ -127,7 +127,11 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64, help="Training batch_size (per GPU)")
     parser.add_argument("--num_pomo_samples", type=int, default=8, 
                         help="Number of POMO samples (start nodes) during training.")
-    
+
+    # --- 데이터 증강 ---
+    parser.add_argument("--use_augmentation", action='store_true', 
+                        help="Enable data augmentation (Load Permutation) during training.")
+
     # --- Critic 사전훈련 ---
     parser.add_argument('--pretrain_critic', type=str, default=None, 
                         help="Path to expert_data.json for Critic pre-training.")

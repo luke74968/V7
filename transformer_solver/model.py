@@ -84,27 +84,31 @@ def reshape_by_heads(qkv: torch.Tensor, head_num: int) -> torch.Tensor:
 
 def multi_head_attention(q, k, v, attention_mask=None):
     """ 
-    표준 Multi-Head Attention 구현.
-    (attention_mask가 bool 타입의 (B, ..., N, N)이라고 가정)
+    PyTorch 2.0+ Scaled Dot Product Attention (SDPA) 적용
+    (메모리 효율성 및 속도 최적화 - FlashAttention 자동 사용)
     """
     batch_s, head_num, n, key_dim = q.shape
     
-    # 1. 스코어 계산
-    score = torch.matmul(q, k.transpose(2, 3))
-    score_scaled = score / (key_dim ** 0.5)
-    
-    # 2. 어텐션 마스킹 (마스크가 0/False인 위치를 -inf로)
+    # SDPA를 위한 마스크 처리
+    # (PyTorch SDPA는 Boolean 마스크 지원이 버전마다 상이하므로, 
+    #  확실하게 -inf를 더하는 방식의 Float 마스크로 변환하여 전달)
+    attn_mask = None
     if attention_mask is not None:
         if attention_mask.dim() == 3:
             attention_mask = attention_mask.unsqueeze(1) # (B, N, N) -> (B, 1, N, N)
         
-        score_scaled = score_scaled.masked_fill(attention_mask == 0, -1e12)
-        
-    # 3. Softmax 및 Value 적용
-    weights = nn.Softmax(dim=3)(score_scaled)
-    out = torch.matmul(weights, v)
+        # True(유효) -> 0.0, False(마스킹) -> -inf
+        attn_mask = torch.zeros_like(attention_mask, dtype=q.dtype)
+        attn_mask.masked_fill_(~attention_mask, -float('inf'))
+
+    # PyTorch 2.0+ 최적화 함수 사용
+    # (내부적으로 FlashAttention 등을 사용하여 메모리 사용량을 획기적으로 줄임)
+    out = F.scaled_dot_product_attention(
+        q, k, v, 
+        attn_mask=attn_mask
+    )
     
-    # 4. (B, H, N, D) -> (B, N, H*D)
+    # 4. (B, H, N, D) -> (B, N, H*D)s
     out_transposed = out.transpose(1, 2)
     return out_transposed.contiguous().view(batch_s, n, head_num * key_dim)
 
@@ -173,20 +177,20 @@ class PocatDecoderLayer(nn.Module):
         self.head_num = head_num
         self.qkv_dim = qkv_dim
 
-    def forward(self, x, encoder_out):
+    def forward(self, x, cross_k, cross_v):
         """
         x: (B, 1, D) - 현재 디코더의 Query 상태
-        encoder_out: (B, N, D) - 인코더 출력 (Context)
+        cross_k, cross_v: (B, H, N, D/H) - 미리 계산된 Key, Value
         """
         # --- Cross Attention ---
         # Query: 현재 레이어의 입력 x
         q = reshape_by_heads(self.Wq(x), self.head_num)
         
-        # Key, Value: 인코더 출력 (매 레이어마다 새로 계산하여 표현력 증대)
-        k = reshape_by_heads(self.Wk(encoder_out), self.head_num)
-        v = reshape_by_heads(self.Wv(encoder_out), self.head_num)
+        # Key, Value: 인자로 받은 캐시 사용 (재계산 X)
+        # k = reshape_by_heads(self.Wk(encoder_out), self.head_num)
+        # v = reshape_by_heads(self.Wv(encoder_out), self.head_num)
         
-        mha_out = multi_head_attention(q, k, v)
+        mha_out = multi_head_attention(q, cross_k, cross_v)
         mha_out = self.multi_head_combine(mha_out)
         
         h = self.norm1(x + mha_out) # Residual + Norm
@@ -211,15 +215,24 @@ class PrecomputedCache:
     #glimpse_val: torch.Tensor
     logit_key_connect: torch.Tensor # 'Connect' 포인터용 Key
     logit_key_spawn: torch.Tensor   # 'Spawn' 포인터용 Key
+    # [추가] 디코더 레이어별 Cross-Attention Key/Value 캐시
+    decoder_layer_kvs: List[Tuple[torch.Tensor, torch.Tensor]] = None
 
     def batchify(self, num_starts: int):
         """ POMO 샘플링을 위해 캐시를 N_starts 배수만큼 복제합니다. """
+        # kv 리스트 확장
+        new_kvs = []
+        if self.decoder_layer_kvs:
+            for k, v in self.decoder_layer_kvs:
+                new_kvs.append((batchify(k, num_starts), batchify(v, num_starts)))
+
         return PrecomputedCache(
             batchify(self.node_embeddings, num_starts),
             #batchify(self.glimpse_key, num_starts),
             #batchify(self.glimpse_val, num_starts),
             batchify(self.logit_key_connect, num_starts),
             batchify(self.logit_key_spawn, num_starts),
+            new_kvs # [추가]
         )
 
 # ---
@@ -420,10 +433,11 @@ class PocatDecoder(nn.Module):
 
         # 2. 디코더 레이어 순차 통과 (Stacking)
         # q_vec이 각 레이어를 거치며 점점 더 정교한 Context Vector가 됩니다.
-        encoder_out = cache.node_embeddings # (B, N, D)
+        # encoder_out = cache.node_embeddings # (B, N, D) <-- 삭제 (캐시 사용)
         
-        for layer in self.layers:
-            q_vec = layer(q_vec, encoder_out)
+        for i, layer in enumerate(self.layers):
+            k_cache, v_cache = cache.decoder_layer_kvs[i]
+            q_vec = layer(q_vec, k_cache, v_cache)
 
         # --- 3. 최종 결정 (Heads) ---
         value = self.value_head(q_vec).squeeze(-1)
@@ -480,14 +494,19 @@ class PocatModel(nn.Module):
         
         log_prob = F.log_softmax(scores, dim=-1)
         probs = log_prob.exp()
-        
+
+        # --- [추가] 엔트로피 계산 ---
+        dist = Categorical(probs=probs)
+        entropy = dist.entropy()
+        # ---------------------------
+
         if decode_type == 'greedy':
             action = probs.argmax(dim=-1)
         else: # 'sampling'
             action = Categorical(probs=probs).sample()
             
         # 선택된 액션의 로그 확률 반환
-        return action, log_prob.gather(1, action.unsqueeze(-1)).squeeze(-1)
+        return action, log_prob.gather(1, action.unsqueeze(-1)).squeeze(-1), entropy
 
     def _combine_log_probs(self, 
                            log_prob_type, action_type, 
@@ -534,13 +553,23 @@ class PocatModel(nn.Module):
         # 포인터 헤드별 Key 생성
         logit_key_connect = self.decoder.Wk_connect_logit(encoded_nodes).transpose(1, 2)
         logit_key_spawn = self.decoder.Wk_spawn_logit(encoded_nodes).transpose(1, 2)
-        
+
+        # [추가] 디코더 레이어용 K, V 미리 계산 (Pre-computation)
+        # 루프 밖에서 한 번만 계산하므로 메모리와 연산량이 획기적으로 줄어듭니다.
+        decoder_layer_kvs = []
+        for layer in self.decoder.layers:
+            # (B, N, D) -> (B, H, N, D/H)
+            k = reshape_by_heads(layer.Wk(encoded_nodes), layer.head_num)
+            v = reshape_by_heads(layer.Wv(encoded_nodes), layer.head_num)
+            decoder_layer_kvs.append((k, v))
+
         cache = PrecomputedCache(
             node_embeddings=encoded_nodes,
             #glimpse_key=glimpse_key,
             #glimpse_val=glimpse_val,
             logit_key_connect=logit_key_connect,
-            logit_key_spawn=logit_key_spawn
+            logit_key_spawn=logit_key_spawn,
+            decoder_layer_kvs=decoder_layer_kvs # [추가]
         )
         
         # --- 2. POMO (Multi-Start) 준비 ---
@@ -568,6 +597,7 @@ class PocatModel(nn.Module):
         log_probs: List[torch.Tensor] = []
         actions: List[Dict[str, torch.Tensor]] = []
         rewards: List[torch.Tensor] = []
+        entropies: List[torch.Tensor] = [] # [추가] 엔트로피 저장용
         first_value: torch.Tensor = None
         
         decoding_step = 0
@@ -592,15 +622,20 @@ class PocatModel(nn.Module):
                 masks: Dict[str, torch.Tensor] = env.get_action_mask(td)
             
             # 3. 3개 헤드에서 각각 샘플링
-            action_type, log_prob_type = self._sample_action(
+            action_type, log_prob_type, ent_type = self._sample_action(
                 logits_type, masks["mask_type"], decode_type
             )
-            action_connect, log_prob_connect = self._sample_action(
+            action_connect, log_prob_connect, ent_connect = self._sample_action(
                 logits_connect, masks["mask_connect"], decode_type
             )
-            action_spawn, log_prob_spawn = self._sample_action(
+            action_spawn, log_prob_spawn, ent_spawn = self._sample_action(
                 logits_spawn, masks["mask_spawn"], decode_type
             )
+
+            # [추가] 스텝별 총 엔트로피 합산 (Action Type + Argument)
+            # Connect를 골랐으면 Connect 엔트로피, Spawn이면 Spawn 엔트로피 사용
+            step_entropy = ent_type + torch.where(action_type == 0, ent_connect, ent_spawn)
+            entropies.append(step_entropy)
 
             # 4. Parameterized Action Log Prob 결합
             final_log_prob = self._combine_log_probs(
@@ -628,6 +663,11 @@ class PocatModel(nn.Module):
                     probs_connect = self._get_masked_probs(logits_connect[sample_idx], masks["mask_connect"][sample_idx])
                     probs_spawn = self._get_masked_probs(logits_spawn[sample_idx], masks["mask_spawn"][sample_idx])
 
+                    # [추가] 원본 점수(Score) 계산 (Softmax 전 단계의 값)
+                    # Score = Tanh(Logit) * Clipping_Value (예: -10 ~ +10 사이)
+                    scores_connect = self.logit_clipping * torch.tanh(logits_connect[sample_idx])
+                    scores_spawn = self.logit_clipping * torch.tanh(logits_spawn[sample_idx])
+
                     # --- 2. 이름 매핑 준비 ---
                     # (환경 설정에서 정적 이름 목록 가져오기)
                     node_names = env.generator.config.node_names
@@ -637,7 +677,22 @@ class PocatModel(nn.Module):
 
                     head_name = get_name(current_head)
                     
-                    log_fn(f"\n[Step {decoding_step:02d}] Current Head: {head_name} (idx: {current_head})")
+                    # =========================================================
+                    # ✨ [수정] Rail Type + AO 상태 정보 추출 및 로그 포맷 ✨                    # =========================================================
+                    # 1. Rail Type (독립 여부)
+                    rail_val = td["nodes"][sample_idx, current_head, FEATURE_INDEX["independent_rail_type"]].item()
+                    # 가독성을 위한 문자열 매핑 (0:Normal, 1:Sup, 2:Path)
+                    if rail_val == 1.0: rail_str = "Type: Supplier(1)"
+                    elif rail_val == 2.0: rail_str = "Type: Path(2)"
+                    else: rail_str = "Type: Normal(0)"
+                    
+                    # 2. AO State (암전류 상태)
+                    ao_val = td["nodes"][sample_idx, current_head, FEATURE_INDEX["always_on_in_sleep"]].item()
+                    ao_str = "AO: Yes" if ao_val == 1.0 else "AO: No"
+                    
+                    # (idx와 type을 함께 출력)
+                    log_fn(f"\n[Step {decoding_step:02d}] Current Head: {head_name} (idx: {current_head} | {rail_str} | {ao_str})")
+                    # =========================================================
 
                     # --- 3. Action Type 확률 출력 ---
                     p_conn = probs_type[0].item()
@@ -661,13 +716,14 @@ class PocatModel(nn.Module):
                         cand_probs = []
                         for idx in valid_connect_indices:
                             prob = probs_connect[idx].item()
-                            cand_probs.append((prob, idx.item()))
+                            score = scores_connect[idx].item() # [추가] 점수 가져오기
+                            cand_probs.append((prob, score, idx.item()))
                         cand_probs.sort(key=lambda x: x[0], reverse=True)
 
-                        for prob, idx in cand_probs:
+                        for prob, score, idx in cand_probs:
                             name = get_name(idx)
                             is_picked = (chosen_type == 0 and action_connect[sample_idx].item() == idx)
-                            log_fn(f"     - {name:<25} : {prob*100:.2f}% {'✅' if is_picked else ''}")
+                            log_fn(f"     - {name:<25} : {prob*100:.2f}% (Sc: {score:5.2f}) {'✅' if is_picked else ''}")
                     
                     # (B) Spawn 후보들
                     if masks["mask_type"][sample_idx, 1]: # Spawn이 가능한 경우만
@@ -677,13 +733,15 @@ class PocatModel(nn.Module):
                         cand_probs = []
                         for idx in valid_spawn_indices:
                             prob = probs_spawn[idx].item()
-                            cand_probs.append((prob, idx.item()))
+                            score = scores_spawn[idx].item() # [추가] 점수 가져오기
+                            cand_probs.append((prob, score, idx.item()))
+
                         cand_probs.sort(key=lambda x: x[0], reverse=True)
 
-                        for prob, idx in cand_probs:
+                        for prob, score, idx in cand_probs:
                             name = get_name(idx)
                             is_picked = (chosen_type == 1 and action_spawn[sample_idx].item() == idx)
-                            log_fn(f"     - {name:<25} : {prob*100:.2f}% {'✅' if is_picked else ''}")
+                            log_fn(f"     - {name:<25} : {prob*100:.2f}% (Sc: {score:5.2f}) {'✅' if is_picked else ''}")
 
                     log_fn("-" * 60)
             # [END]: 'detail' 모드 액션 로깅
@@ -720,6 +778,12 @@ class PocatModel(nn.Module):
         # (B_total, T) -> (B_total)
         total_log_likelihood = torch.stack(log_probs, 1).sum(1)
 
+        # [추가] 평균 엔트로피 계산
+        if entropies:
+            avg_entropy = torch.stack(entropies, 1).mean(1) # (B,) 에피소드 평균
+        else:
+            avg_entropy = torch.zeros_like(total_log_likelihood)
+
         # [추가] 최종 상태에서 비용 정보 추출
         final_bom_cost = td["current_cost"].squeeze(-1)
         final_sleep_cost = td["sleep_cost"].squeeze(-1)
@@ -728,6 +792,7 @@ class PocatModel(nn.Module):
         result = {
             "reward": total_reward,
             "log_likelihood": total_log_likelihood,
+            "entropy": avg_entropy, # [추가]
             "actions": actions,  # (디버깅용)
             "value": first_value,
             "bom_cost": final_bom_cost, # [추가]

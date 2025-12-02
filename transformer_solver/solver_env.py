@@ -460,8 +460,20 @@ class PocatEnv(EnvBase):
                 status_from_child = torch.max(status_to_propagate, status_from_supplier)
                 new_parent_status = torch.max(parent_status, status_from_child)
                 next_obs["is_exclusive_mask"][b_idx_node, parent_node] = new_parent_status
+                next_obs["nodes"][b_idx_node, parent_node, FEATURE_INDEX["independent_rail_type"]] = new_parent_status.float()
 
-            # 3c. 다음 Head 설정
+            # --- [추가] 3c. 'Always-On' 상태 전파 (자식 -> 부모) ---
+            # 자식이 잘 때도 켜져야 한다면(AO), 부모도 무조건 켜져 있어야 함(AO).
+            # 모델에게 "이 부모는 이미 깨어있음(Penalty Pre-paid)"을 알려주어 그룹화를 유도함.
+            child_is_ao = next_obs["nodes"][b_idx_node, child_node, FEATURE_INDEX["always_on_in_sleep"]]
+            
+            # (이미 1.0이면 유지, 아니면 자식 상태에 따라 1.0으로 변경)
+            current_parent_ao = next_obs["nodes"][b_idx_node, parent_node, FEATURE_INDEX["always_on_in_sleep"]]
+            new_parent_ao = torch.max(current_parent_ao, child_is_ao)
+            next_obs["nodes"][b_idx_node, parent_node, FEATURE_INDEX["always_on_in_sleep"]] = new_parent_ao
+
+
+            # 3d. 다음 Head 설정
             parent_is_battery = (parent_node == BATTERY_NODE_IDX)
             
             # 헤드(parent_node)가 이미 부모를 가졌는지 확인
@@ -477,7 +489,7 @@ class PocatEnv(EnvBase):
                 parent_node        # 아니면 경로 추적 계속
             )
             
-            # 3d. 경로 완성 (R_path 보상) [수정]
+            # 3e. 경로 완성 (R_path 보상) [수정]
             # parent_is_battery 대신 path_is_finished 조건을 사용하여
             # 기존 트리에 연결된 경우(parent_already_has_parent)에도 비용을 정산하도록 변경
             if path_is_finished.any():
