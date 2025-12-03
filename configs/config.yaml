@@ -11,7 +11,7 @@ model_params:
    ff_hidden_dim: 512
    ffd: 'siglu'
    norm_type: 'rms'
-   logit_clipping: 10
+   logit_clipping: 50
 
 
 # 옵티마이저 및 스케줄러 파라미터

@@ -41,6 +41,7 @@ def update_progress(pbar, metrics, step):
     metrics_str = (
         f"Loss: {metrics['Loss']:.4f} "
         f"($Avg: {metrics['Avg Cost']:.2f}, $AvgMin: {metrics['Avg Min Batch']:.2f}, $Min: {metrics['Min Cost']:.2f}) | "
+        f"Ent: {metrics['Entropy']:.4f} | "  # [추가] 엔트로피 출력
         f"BOM ${metrics['Avg BOM']:.2f} + Sleep {metrics['Avg Sleep']:.1f}"
     )
     pbar.set_postfix_str(metrics_str, refresh=False)
@@ -356,6 +357,9 @@ class PocatTrainer:
                     total_policy_loss += policy_loss.item()
                     #total_critic_loss += critic_loss.item()
 
+                    # [수정] 변수 선언 위치 확인 (Rank 0 블록 내부)
+                    avg_entropy_val = out["entropy"].mean().item()
+
                     update_progress(
                         train_pbar,
                         {
@@ -363,6 +367,7 @@ class PocatTrainer:
                             "Avg Cost": total_cost / step,
                             "Avg Min Batch": total_min_batch_cost / step, # [추가] 배치별 최소값의 평균
                             "Min Cost": min_epoch_cost,
+                            "Entropy": avg_entropy_val, # [추가]
                             "Avg BOM": avg_bom,    # [추가]
                             "Avg Sleep": avg_sleep # [추가]
                         },

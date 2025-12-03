@@ -480,14 +480,18 @@ class PocatModel(nn.Module):
         probs = F.softmax(scores, dim=-1)
         return probs  
 
-    def _sample_action(self, logits, mask, decode_type):
+    def _sample_action(self, logits, mask, decode_type, temperature=1.0): # [추가] temperature
         """ 
         로짓과 마스크를 받아 액션(idx)과 로그 확률(log_prob)을 반환합니다.
         (막다른 길 방지 로직 포함)
         """
         scores = self.logit_clipping * torch.tanh(logits)
         scores.masked_fill_(~mask, -float('inf'))
-        
+
+        # [추가] Temperature Scaling (확률 분포를 평평하게 만듦)
+        # 값이 클수록(>1.0) 무작위성이 강해짐
+        scores = scores / temperature
+
         # 모든 액션이 마스킹된 '막다른 길' 상태 방지
         is_stuck = torch.all(scores == -float('inf'), dim=-1)
         scores[is_stuck, 0] = 0.0 # (0번 인덱스(배터리)라도 강제 선택)
@@ -621,18 +625,26 @@ class PocatModel(nn.Module):
             with torch.no_grad():
                 masks: Dict[str, torch.Tensor] = env.get_action_mask(td)
             
+            # [추가] Temperature 스케줄링 (학습 모드일 때만 적용)
+            # 학습 초반에는 5.0 등으로 높게 설정하여 강제 탐색 유도 필요
+            temp = 1.0 
+            if self.training: # model.train() 상태일 때
+                 # 예: 로그 등을 통해 외부에서 제어하거나, 일단 상수로 테스트
+                 temp = 2.0
+
+
             # 3. 3개 헤드에서 각각 샘플링
             action_type, log_prob_type, ent_type = self._sample_action(
-                logits_type, masks["mask_type"], decode_type
+                logits_type, masks["mask_type"], decode_type, temperature=temp
             )
             action_connect, log_prob_connect, ent_connect = self._sample_action(
-                logits_connect, masks["mask_connect"], decode_type
+                logits_connect, masks["mask_connect"], decode_type, temperature=temp
             )
             action_spawn, log_prob_spawn, ent_spawn = self._sample_action(
-                logits_spawn, masks["mask_spawn"], decode_type
+                logits_spawn, masks["mask_spawn"], decode_type, temperature=temp
             )
 
-            # [추가] 스텝별 총 엔트로피 합산 (Action Type + Argument)
+            # [추가] 스텝별 총 엔트로피 합 산 (Action Type + Argument)
             # Connect를 골랐으면 Connect 엔트로피, Spawn이면 Spawn 엔트로피 사용
             step_entropy = ent_type + torch.where(action_type == 0, ent_connect, ent_spawn)
             entropies.append(step_entropy)
@@ -665,17 +677,38 @@ class PocatModel(nn.Module):
 
                     # [추가] 원본 점수(Score) 계산 (Softmax 전 단계의 값)
                     # Score = Tanh(Logit) * Clipping_Value (예: -10 ~ +10 사이)
+                    scores_type = self.logit_clipping * torch.tanh(logits_type[sample_idx]) # [추가] Type 점수
                     scores_connect = self.logit_clipping * torch.tanh(logits_connect[sample_idx])
                     scores_spawn = self.logit_clipping * torch.tanh(logits_spawn[sample_idx])
+
+                    # [추가] 클리핑 전 원본 로짓(Raw Logit) 추출
+                    raw_type = logits_type[sample_idx]
+                    raw_connect = logits_connect[sample_idx]
+                    raw_spawn = logits_spawn[sample_idx]
 
                     # --- 2. 이름 매핑 준비 ---
                     # (환경 설정에서 정적 이름 목록 가져오기)
                     node_names = env.generator.config.node_names
-                    def get_name(idx):
-                        if 0 <= idx < len(node_names): return node_names[idx]
+                    # [수정] 원본 템플릿을 추적하여 이름을 반환하는 함수
+                    def get_name_with_origin(idx):
+                        # 1. 정적 노드 (Battery, Load, Template 원본)
+                        if 0 <= idx < len(node_names): 
+                            return node_names[idx]
+                        
+                        # 2. 동적 노드 (Spawned) -> 피처에서 원본 ID 역추적
+                        try:
+                            # node_id 피처는 템플릿에서 복사되었으므로 원본 인덱스를 가짐
+                            node_id_val = td["nodes"][sample_idx, idx, FEATURE_INDEX["node_id"]].item()
+                            origin_idx = int(round(node_id_val * env.N_MAX))
+                            
+                            if 0 <= origin_idx < len(node_names):
+                                origin_name = node_names[origin_idx]
+                                return f"Spawned_Node_{idx} (from {origin_name})"
+                        except:
+                            pass
                         return f"Spawned_Node_{idx}" # 동적 생성된 노드는 인덱스로 표시
 
-                    head_name = get_name(current_head)
+                    head_name = get_name_with_origin(current_head) # [수정]
                     
                     # =========================================================
                     # ✨ [수정] Rail Type + AO 상태 정보 추출 및 로그 포맷 ✨                    # =========================================================
@@ -698,13 +731,24 @@ class PocatModel(nn.Module):
                     p_conn = probs_type[0].item()
                     p_spwn = probs_type[1].item()
                     
+                    s_conn = scores_type[0].item()
+                    s_spwn = scores_type[1].item()
+
+                    r_conn = raw_type[0].item()
+                    r_spwn = raw_type[1].item()
+
                     chosen_type = action_type[sample_idx].item()
                     type_str = "Connect" if chosen_type == 0 else "Spawn"
                     
-                    log_fn(f"  📊 Action Type Probabilities:")
-                    log_fn(f"     - Connect: {p_conn*100:.2f}% {'👈 Selected' if chosen_type==0 else ''}")
-                    log_fn(f"     - Spawn  : {p_spwn*100:.2f}% {'👈 Selected' if chosen_type==1 else ''}")
+                    is_connect_valid = masks["mask_type"][sample_idx, 0].item()
+                    is_spawn_valid = masks["mask_type"][sample_idx, 1].item()
 
+                    tag_conn = "" if is_connect_valid else " 🚫 [Masked]"
+                    tag_spwn = "" if is_spawn_valid else " 🚫 [Masked]"
+                    
+                    log_fn(f"  📊 Action Type Probabilities:")
+                    log_fn(f"     - Connect: {p_conn*100:.2f}% (Sc: {s_conn:6.3f} | Raw: {r_conn:6.3f}){tag_conn} {'👈 Selected' if chosen_type==0 else ''}")
+                    log_fn(f"     - Spawn  : {p_spwn*100:.2f}% (Sc: {s_spwn:6.3f} | Raw: {r_spwn:6.3f}){tag_spwn} {'👈 Selected' if chosen_type==1 else ''}")
                     # --- 4. 상세 후보 확률 출력 ---
                     
                     # (A) Connect 후보들
@@ -717,15 +761,15 @@ class PocatModel(nn.Module):
                         for idx in valid_connect_indices:
                             prob = probs_connect[idx].item()
                             score = scores_connect[idx].item() # [추가] 점수 가져오기
-                            cand_probs.append((prob, score, idx.item()))
+                            raw = raw_connect[idx].item() # [추가]
+                            cand_probs.append((prob, score, raw, idx.item()))
                         cand_probs.sort(key=lambda x: x[0], reverse=True)
 
-                        for prob, score, idx in cand_probs:
-                            name = get_name(idx)
+                        for prob, score, raw, idx in cand_probs:
+                            name = get_name_with_origin(idx) # [수정]
                             is_picked = (chosen_type == 0 and action_connect[sample_idx].item() == idx)
-                            log_fn(f"     - {name:<25} : {prob*100:.2f}% (Sc: {score:5.2f}) {'✅' if is_picked else ''}")
-                    
-                    # (B) Spawn 후보들
+                            # 이름 공간을 25 -> 60으로 늘림 (긴 이름 표시용)
+                            log_fn(f"     - {name:<60} : {prob*100:.2f}% (Sc: {score:6.3f} | Raw: {raw:6.3f}){tag_conn} {'✅' if is_picked else ''}")
                     if masks["mask_type"][sample_idx, 1]: # Spawn이 가능한 경우만
                         log_fn(f"  📦 Spawn Candidates (P(Template | Spawn)):")
                         valid_spawn_indices = torch.where(masks["mask_spawn"][sample_idx])[0]
@@ -734,14 +778,19 @@ class PocatModel(nn.Module):
                         for idx in valid_spawn_indices:
                             prob = probs_spawn[idx].item()
                             score = scores_spawn[idx].item() # [추가] 점수 가져오기
-                            cand_probs.append((prob, score, idx.item()))
+                            raw = raw_spawn[idx].item() # [추가]
+
+                            i = idx.item()
+                            is_valid = masks["mask_spawn"][sample_idx, i].item()
+                            tag = "" if is_valid else " 🚫 [Masked] (Error?)"
+                            cand_probs.append((prob, score, raw, i, tag))
 
                         cand_probs.sort(key=lambda x: x[0], reverse=True)
 
-                        for prob, score, idx in cand_probs:
-                            name = get_name(idx)
+                        for prob, score, raw, idx in cand_probs:
+                            name = get_name_with_origin(idx)
                             is_picked = (chosen_type == 1 and action_spawn[sample_idx].item() == idx)
-                            log_fn(f"     - {name:<25} : {prob*100:.2f}% (Sc: {score:5.2f}) {'✅' if is_picked else ''}")
+                            log_fn(f"     - {name:<60} : {prob*100:.2f}% (Sc: {score:6.3f} | Raw: {raw:6.3f}){tag} {'✅' if is_picked else ''}")
 
                     log_fn("-" * 60)
             # [END]: 'detail' 모드 액션 로깅
